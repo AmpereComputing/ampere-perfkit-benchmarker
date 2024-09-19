@@ -1,7 +1,4 @@
-#!/usr/bin/env python
-# Modifications Copyright (c) 2024 Ampere Computing LLC
-# Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
-#
+# Copyright (c) 2024, Ampere Computing LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,14 +11,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl import app
-from perfkitbenchmarker import pkb
+OCI = 'OCI'
 
-from perfkitbenchmarker.pkb import Main
-try:
-    from ampere.pkb.bootstrap import bootstrap as ampere_bootstrap_pkb
-    ampere_bootstrap_pkb()
-except ImportError:
-    ampere_bootstrap_pkb = None
-
-app.run(pkb.Main, flags_parser=pkb.ParseArgs)
+VALID_CLOUDS = (OCI, )
