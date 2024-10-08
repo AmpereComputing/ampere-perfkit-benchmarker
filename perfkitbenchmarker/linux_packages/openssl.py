@@ -39,3 +39,4 @@ def AptInstallQAT(vm):
 
   # Install QAT_Engine
   vm.RemoteCommand('git clone https://github.com/intel/QAT_Engine.git && cd QAT_Engine && git checkout v1.2.0 && ./autogen.sh && ./configure --enable-qat_sw && make -j && sudo make install')
+
