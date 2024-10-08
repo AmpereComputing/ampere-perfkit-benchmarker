@@ -25,6 +25,7 @@ def AptInstall(vm):
   """Installs OpenSSL on the VM."""
   vm.InstallPackages('openssl libssl-dev')
 
+
 def AptInstallQAT(vm):
   """Installs QAT engine for accelerated OpenSSL."""
 
