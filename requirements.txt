@@ -31,9 +31,15 @@ numpy>=1.16.5,<2.0
 contextlib2>=0.5.1
 six>=1.13.0
 pywinrm
+timeout-decorator
+google-cloud-aiplatform
+google-cloud-core
+google-cloud-datastore
+google-cloud-monitoring>=2.0.0
+immutabledict
+beautifulsoup4
 requests
 rsa>=4.7.2
 seaborn
 ptyprocess==0.7.0
 python-dotenv==1.0.1
-
