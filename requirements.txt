@@ -33,6 +33,7 @@ google-cloud-aiplatform
 google-cloud-core
 google-cloud-datastore
 google-cloud-monitoring>=2.0.0
+immutabledict
 beautifulsoup4
 requests
 seaborn
