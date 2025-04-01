@@ -12,7 +12,12 @@ Features Added
 - Additional support for BareMetal testing
 - IRQ binding for experimentation with network intensive workloads
 - A global tuning module that enables declarative bash commands from yaml configs on all systems involved in a test
-- Max throughput mode for key workloads to determine the best throughput possible under a given SLA
+- Max throughput mode for key workloads to determine the best throughput possible under a given SLA 
+- Includes a suite of microbenchmarks to help characterize performance and system health:  
+  - Multichase: measures memory latency and bandwidth by simulating various memory access patterns
+  - SPECint: characterize compute performance
+  - Netperf: network performance, optimization and troubleshooting
+  - FIO: evaluate I/O characteristics
 
 In summary, APT is great at capturing all workload parameters and system-under-test parameters in a single, re-playable,
 yaml file.
