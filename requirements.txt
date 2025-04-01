@@ -11,44 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-click==8.0.3
-tabulate
-loguru>=0.5.0
-rsa>=4.7.2
 absl-py
 beautifulsoup4
 blinker>=1.3
-packaging
-pandas>=1.1.5
-PyYAML>=5.4.1
-pint
-numpy>=1.16.5,<2.0
 colorlog[windows]==2.6.0
-packaging
-pandas>=1.1.5
-PyYAML>=5.4.1
-pint
-numpy>=1.16.5,<2.0
 contextlib2>=0.5.1
 google-cloud-aiplatform
 google-cloud-core
 google-cloud-datastore
 google-cloud-monitoring>=2.0.0
-beautifulsoup4
-requests
-seaborn
-ptyprocess==0.7.0
-python-dotenv==1.0.1
-
 immutabledict
 jinja2>=2.10.2
+numpy>=1.16.5
+packaging
+pandas>=1.1.5
+pint
+PyYAML>=5.4.1
 pywinrm
 requests
 rsa>=4.7.2
+seaborn
 setuptools>=40.3.0
 six>=1.13.0
 timeout-decorator
-
-# unlike setup.py requirements.txt cannot require a Python version AFAICT
-# this hack requires a non-existent package when Python is less than 3.11
-PerfkitBenchmarker_requires_Python_311;python_version<"3.11"

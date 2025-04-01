@@ -313,6 +313,40 @@ class OciVcn(resource.BaseResource):
         create_cmd = util.GetEncodedCmd(create_cmd)
         stdout, _, _ = vm_util.IssueCommand(create_cmd, raise_on_failure=False)
 
+
+    def SetSecurityListIngressRule(self,protocol="6", start_port=22, end_port=None, source_range=None, protocol_type=None, protocol_code=None):
+        if not end_port:
+            end_port = start_port
+        end_port = end_port or start_port
+        source_range = source_range or '0.0.0.0/0'
+        #tcp =6 #udp=17
+        """Updates security list to allow traffic on a specific port"""
+        #start_port=22, end_port=None, source_range=None, protocol_type=None, protocol_code=None
+        source = "\"source\":\"%s\" ," % source_range
+
+        protocol_str = "\"protocol\": \"%s\" ," % protocol
+        if protocol == "1":
+            if protocol_type is None and protocol_code is None:
+                icmp_options = "\"icmp-options\": null,"
+                tcpOptions = "\"tcp-options\": null,"
+            else:
+                icmp_options = "\"icmp-options\": { \"code\": %s, \"type\": %s}," % (str(protocol_code), str(protocol_type))
+                tcpOptions = "\"tcp-options\": null,"
+            start_port = None
+        else:
+            icmp_options = "\"icmp-options\": null,"
+        if start_port and protocol == "6":
+            tcpOptions = "\"tcp-options\":{\"destinationPortRange\": {\"max\": %s, \"min\": %s }}," % (str(end_port), str(start_port))
+            udp_options = "\"udp-options\": null"
+        elif start_port and protocol == "17":
+            udp_options = "\"udp-options\":{\"destinationPortRange\": {\"max\": %s, \"min\": %s }}" % (str(end_port), str(start_port))
+            tcpOptions = "\"tcp-options\": null,"
+        else:
+            udp_options = "\"udp-options\": null"
+        rule_json_string = "{%s %s %s \"is-stateless\": false, %s %s }" % (source, icmp_options, protocol_str, tcpOptions, udp_options)
+        return rule_json_string
+
+
     def AddSecurityListIngressRule(
         self,
         protocol="6",
@@ -333,41 +367,9 @@ class OciVcn(resource.BaseResource):
         """Updates security list to allow traffic on a specific port"""
         logging.info(f"Add ingress rule for ports {start_port} : {end_port}")
         # start_port=22, end_port=None, source_range=None, protocol_type=None, protocol_code=None
-        source = '"source":"%s" ,' % source_range
 
-        protocol_str = '"protocol": "%s" ,' % protocol
-        if protocol == "1":
-            if protocol_type is None and protocol_code is None:
-                icmp_options = '"icmp-options": null,'
-            else:
-                icmp_options = '"icmp-options": { "code": %s, "type": %s},' % (
-                    str(protocol_code),
-                    str(protocol_type),
-                )
-            start_port = None
-        else:
-            icmp_options = '"icmp-options": null,'
-
-        if start_port:
-            tcpOptions = (
-                '"tcp-options":{"destinationPortRange": {"max": %s, "min": %s }},'
-                % (str(end_port), str(start_port))
-            )
-        else:
-            tcpOptions = '"tcp-options": null,'
-
-        udp_options = '"udp-options": null'
-
-        rule_json_string = '{%s %s %s "is-stateless": false, %s %s }' % (
-            source,
-            icmp_options,
-            protocol_str,
-            tcpOptions,
-            udp_options,
-        )
-
+        rule_json_string = self.SetSecurityListIngressRule(protocol,start_port,end_port,source_range,protocol_type,protocol_code)
         current_security_rules.append(json.loads(rule_json_string))
-
         current_security_rules_str = json.dumps(current_security_rules)
         current_security_rules_str = "'%s'" % current_security_rules_str
         cmd = util.OCI_PREFIX + [
@@ -382,6 +384,8 @@ class OciVcn(resource.BaseResource):
 
         cmd = util.GetEncodedCmd(cmd)
         stdout, _, _ = vm_util.IssueCommand(cmd, raise_on_failure=False)
+
+
 
     def GetSecurityListFromId(self):
         cmd = util.OCI_PREFIX + [
@@ -464,12 +468,6 @@ class OciNetwork(network.BaseNetwork):
             self.vcn.WaitForInternetGatewayStatus(["AVAILABLE"])
             self.vcn.UpdateRouteTable()
             self.vcn.WaitForRouteTableStatus(["AVAILABLE"])
-            # Add opening in VCN for SSH
-            self.vcn.AddSecurityListIngressRule(protocol="6", start_port=22)
-            self.vcn.WaitForSecurityListStatus(["AVAILABLE"])
-            self.vcn.AddSecurityListIngressRule(protocol="1")
-            self.vcn.WaitForSecurityListStatus(["AVAILABLE"])
-
         else:
             self.vcn.GetVcnIDFromName()
             self.vcn.GetSubnetIdFromVCNId()
@@ -534,4 +532,3 @@ class OCIFirewall(network.BaseFirewall):
                 source_range=source_range,
             )
             vm.network.vcn.WaitForRouteTableStatus(["AVAILABLE"])
-            # protocol="6", start_port=22, end_port=None, source_range=None, protocol_type=None, protocol_code=None
