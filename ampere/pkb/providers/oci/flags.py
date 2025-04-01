@@ -47,3 +47,5 @@ flags.DEFINE_string(
 
 flags.DEFINE_string(
     'oci_profile', None, 'Default profile to be used')
+
+flags.DEFINE_boolean('oci_enable_firewall', True, 'By default firewall service is enabled')

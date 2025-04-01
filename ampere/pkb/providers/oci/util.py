@@ -26,9 +26,15 @@ OCI_PREFIX = ["oci"]
 
 oci_suffix = ""
 
-ADD_CLOUDINIT_TEMPLATE = """#!/bin/bash
+ADD_CLOUDINIT_FIRST_LINE_TEMPLATE = """#!/bin/bash
+"""
+
+ADD_CLOUDINIT_DEBIAN_TEMPLATE = """
 sudo apt update -y
 sudo apt install firewalld -y
+"""
+
+ADD_CLOUDINIT_COMMON_TEMPLATE = """
 echo "{user_name} ALL = NOPASSWD: ALL" >> /etc/sudoers
 useradd {user_name} --home /home/{user_name} --shell /bin/bash -m
 mkdir /home/{user_name}/.ssh
@@ -38,17 +44,11 @@ chmod 700 /home/{user_name}/.ssh
 chmod 600 /home/{user_name}/.ssh/authorized_keys
 """
 
-
-ADD_CLOUDINIT_ORACLE_TEMPLATE = """#!/bin/bash
-echo "{user_name} ALL = NOPASSWD: ALL" >> /etc/sudoers
-useradd {user_name} --home /home/{user_name} --shell /bin/bash -m
-mkdir /home/{user_name}/.ssh
-echo "{public_key}" >> /home/{user_name}/.ssh/authorized_keys
-chown -R {user_name}:{user_name} /home/{user_name}/.ssh
-chmod 700 /home/{user_name}/.ssh
-chmod 600 /home/{user_name}/.ssh/authorized_keys
+ADD_CLOUDINIT_DISABLE_FIREWALL_TEMPLATE = """
+sudo iptables -D INPUT -j REJECT --reject-with icmp-host-prohibited
+sudo iptables -D FORWARD -j REJECT --reject-with icmp-host-prohibited
+sudo systemctl stop firewalld.service
 """
-
 
 
 def SetProfile(suffix):
@@ -169,6 +169,8 @@ def GetOsVersionFromOs(operating_system_version, operating_system):
             return "20.04"
         elif "2204" in operating_system_version:
             return "22.04"
+        elif "2404" in operating_system_version:
+            return "24.04"
     elif operating_system == "Oracle Linux":
         if "9" in operating_system_version:
             return "9"

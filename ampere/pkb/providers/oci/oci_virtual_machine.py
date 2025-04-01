@@ -84,6 +84,10 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
             config_values["machine_type"] = flag_values.machine_type
         if flag_values["oci_network_name"].present:
             config_values["oci_network_name"] = flag_values.oci_network_name
+        if flag_values["oci_network_type"].present:
+            config_values["oci_network_type"] = flag_values.oci_network_type
+        if flag_values["oci_enable_firewall"].present:
+            config_values["oci_enable_firewall"] = flag_values.oci_enable_firewall            
         if flag_values["oci_profile"].present:
             config_values["oci_profile"] = flag_values.oci_profile
 
@@ -115,6 +119,8 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
                 ),
                 "region": (option_decoders.StringDecoder, {"default": None}),
                 "oci_network_name": (option_decoders.StringDecoder, {"default": None}),
+                "oci_network_type": (option_decoders.StringDecoder, {"default": "PARAVIRTUALIZED"}),
+                "oci_enable_firewall": (option_decoders.BooleanDecoder, {"default": True}),                
                 "oci_profile": (option_decoders.StringDecoder, {"default": "DEFAULT"}),
             }
         )
@@ -156,10 +162,12 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
         self.user_name = "perfkit"
         self.network = oci_network.OciNetwork.GetNetwork(self)
         self.local_disk_counter = 0
+        self.enable_firewall = vm_spec.oci_enable_firewall
         self.num_local_ssds = vm_spec.num_local_ssds
         self.max_local_disks = MAX_LOCAL_DISKS
         self.tags = util.MakeFormattedDefaultTags()
         self.firewall = oci_network.OCIFirewall.GetFirewall()
+        self.network_type = vm_spec.oci_network_type
 
     @vm_util.Retry(poll_interval=60, log_errors=False)
     def _WaitForInstanceStatus(self, status_list):
@@ -235,19 +243,21 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
             self.compute_memory,
             self.compute_units,
         )
-        launch_options = '\'{"networkType": "VFIO"}\''
+        launch_options = '\'{"networkType": "%s"}\'' % ( self.network_type )
         key_file_path = vm_util.GetPublicKeyPath()
 
         public_key = util.GetPublicKey()
 
-        if "Oracle" in oci_os_name:
-            user_data = util.ADD_CLOUDINIT_ORACLE_TEMPLATE.format(
-                user_name=self.user_name, public_key=public_key
-            )
+        if "ubuntu" in oci_os_name:
+            user_data = util.ADD_CLOUDINIT_FIRST_LINE_TEMPLATE + util.ADD_CLOUDINIT_DEBIAN_TEMPLATE + util.ADD_CLOUDINIT_COMMON_TEMPLATE.format(
+                        user_name=self.user_name, public_key=public_key)
         else:
-            user_data = util.ADD_CLOUDINIT_TEMPLATE.format(
-                user_name=self.user_name, public_key=public_key
-            )
+            user_data = util.ADD_CLOUDINIT_FIRST_LINE_TEMPLATE + util.ADD_CLOUDINIT_COMMON_TEMPLATE.format(
+                        user_name=self.user_name, public_key=public_key)
+
+        if not self.enable_firewall:
+            user_data = user_data + util.ADD_CLOUDINIT_DISABLE_FIREWALL_TEMPLATE
+
         user_data_filepath = "/tmp/user_data-" + self.name + ".sh"
         with open(user_data_filepath, "w") as user_data_file:
             user_data_file.write(user_data)
@@ -271,6 +281,7 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
             f"--freeform-tags {self.tags}",
             f"--ssh-authorized-keys-file {key_file_path}",
             "--assign-public-ip true",
+            f"--launch-options {launch_options}",
             f"--profile {self.profile}",
         ]
         create_cmd = util.GetEncodedCmd(create_cmd)
@@ -350,8 +361,18 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
         # TODO: Potentially replace for case where firewall skip flag is in place
         super(OciVirtualMachine, self).AllowPort(start_port, end_port, source_range)
 
-    # def _PostCreate(self):
-    #    self.firewall.AllowPort(self, SSH_PORT, SSH_PORT)
+    def _PostCreate(self):
+        self.firewall.AllowPort(self, start_port=SSH_PORT)
+        self.firewall.AllowPort(self, start_port=1, end_port=65535, source_range="172.16.0.0/16")
+        self.firewall.AllowIcmp(self, source_range="172.16.0.0/16")
+        self.firewall.AllowIcmp(self)
+        
+
+class Ubuntu2404BasedOCIVirtualMachine(
+    OciVirtualMachine, linux_virtual_machine.Ubuntu2404Mixin
+):
+    DEFAULT_IMAGE_FAMILY = "ubuntu-os-cloud"
+    DEFAULT_IMAGE_PROJECT = "ubuntu-2404-lts"
 
 
 class Ubuntu2204BasedOCIVirtualMachine(
