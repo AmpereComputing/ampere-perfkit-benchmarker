@@ -49,6 +49,7 @@ In its current release these are the benchmarks that are executed and their asso
 - `redis`: Dual-licensing model with [RSALv2 and SSPLv1](https://github.com/redis/redis/blob/unstable/LICENSE.txt)
 - `sysbench`: [GPL v2](https://github.com/akopytov/sysbench?tab=GPL-2.0-1-ov-file#readme)
 - `wrk`: [Apache v2](https://github.com/wg/wrk/blob/master/LICENSE)
+- `multichase`: [Apache v2](https://github.com/google/multichase/blob/master/LICENSE)
 
 # APT: Overview, Setup, and Usage
 
