@@ -2,7 +2,7 @@
 
 Ampere Performance Toolkit (APT) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
 
-- APT Version: 1.1.0
+- APT Version: 2.0.0
 - Upstream Google PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
 
 Features Added
