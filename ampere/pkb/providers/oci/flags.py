@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Ampere Computing LLC
+# Copyright (c) 2024-2025, Ampere Computing LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,3 +47,5 @@ flags.DEFINE_string(
 
 flags.DEFINE_string(
     'oci_profile', None, 'Default profile to be used')
+
+flags.DEFINE_boolean('oci_enable_firewall', True, 'By default firewall service is enabled')
