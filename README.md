@@ -2,8 +2,8 @@
 
 Ampere Performance Toolkit (APT) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
 
-- APT Version: 1.0.0
-- Upstream Google PerfKitBenchmarker commit SHA: 0fc45c45a25657aa0634ae06cace08cb79e7803b
+- APT Version: 2.0.0
+- Upstream Google PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
 
 Features Added
 
@@ -12,7 +12,12 @@ Features Added
 - Additional support for BareMetal testing
 - IRQ binding for experimentation with network intensive workloads
 - A global tuning module that enables declarative bash commands from yaml configs on all systems involved in a test
-- Max throughput mode for key workloads to determine the best throughput possible under a given SLA
+- Max throughput mode for key workloads to determine the best throughput possible under a given SLA 
+- Includes a suite of microbenchmarks to help characterize performance and system health:  
+  - Multichase: measures memory latency and bandwidth by simulating various memory access patterns
+  - SPECint: characterize compute performance
+  - Netperf: network performance, optimization and troubleshooting
+  - FIO: evaluate I/O characteristics
 
 In summary, APT is great at capturing all workload parameters and system-under-test parameters in a single, re-playable,
 yaml file.
@@ -44,6 +49,7 @@ In its current release these are the benchmarks that are executed and their asso
 - `redis`: Dual-licensing model with [RSALv2 and SSPLv1](https://github.com/redis/redis/blob/unstable/LICENSE.txt)
 - `sysbench`: [GPL v2](https://github.com/akopytov/sysbench?tab=GPL-2.0-1-ov-file#readme)
 - `wrk`: [Apache v2](https://github.com/wg/wrk/blob/master/LICENSE)
+- `multichase`: [Apache v2](https://github.com/google/multichase/blob/master/LICENSE)
 
 # APT: Overview, Setup, and Usage
 
@@ -189,4 +195,3 @@ All test results, logs, Ampere System Dump results, etc. can be found in
 `/tmp/perfkitbenchmarker/runs/<run_uri>`
 
 This directory (with correct run_uri) will be output to the console at the end of each test run.
-

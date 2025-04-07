@@ -1,0 +1,30 @@
+# Use this config:
+#   - ./pkb.py --benchmarks=ampere_multichase_benchmark --benchmark_config_file=/path/to/this/config
+
+static_vms:
+  - &server
+    ip_address: <external_ip> 
+    user_name: <user>
+    ssh_private_key: /path/to/private/key 
+    os_type: <os_type> 
+      
+ampere_multichase_benchmark:
+  vm_groups:
+    default:
+      static_vms:
+        - *server
+  flags:
+    ampere_multichase_benchmark_hugepages: True
+    ampere_multichase_benchmark_numactl: "numactl --localalloc -C 0-191"
+    ampere_multichase_benchmark_tlb_locality: 2147000000 # 16 GiB converted to bytes 
+    ampere_multichase_benchmark_stride_size: 16
+    ampere_multichase_benchmark_nr_samples: 5
+    ampere_multichase_benchmark_threads_list: [1, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192]
+    ampere_multichase_benchmark_total_memory_size: "536870912"
+    ampere_multichase_benchmark_chase: chaseload
+    ampere_multichase_benchmark_load_generator: memcpy-libc
+flags:
+  ampere_tune_global: [
+    "echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled"
+  ]
+
