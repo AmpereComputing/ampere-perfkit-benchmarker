@@ -16,10 +16,12 @@
 """Module containing sysbench installation and cleanup functions."""
 
 import dataclasses
+import logging
 import re
 import statistics
 
 from absl import flags
+import immutabledict
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import sample
@@ -33,6 +35,11 @@ _IGNORE_CONCURRENT = flags.DEFINE_bool(
     'If true, ignores concurrent modification P0001 exceptions thrown by '
     'some databases.',
 )
+
+_SYSBENCH_SPANNER_OLTP_COMMIT_DELAY = flags.DEFINE_integer(
+    'sysbench_max_commit_delay', None, 'Max commit delay for spanner oltp in ms'
+)
+
 # release 1.0.20; committed Apr 24, 2020. When updating this, also update the
 # correct line for CONCURRENT_MODS, as it may have changed in between releases.
 DEFAULT_RELEASE_TAG = '1.0.20'
@@ -61,9 +68,11 @@ CONCURRENT_MODS = (
 
 # Sysbench TPCC-addon script
 SYSBENCH_TPCC_REPRO = 'https://github.com/Percona-Lab/sysbench-tpcc.git'
+SYSBENCH_COMMIT_DELAY = '{COMMIT_DELAY}'
+DB_DRIVER_KEY = 'db_driver'
 
 
-def _Install(vm, spanner_oltp=False):
+def _Install(vm, spanner_oltp=False, args=immutabledict.immutabledict()):
   """Installs the sysbench package on the VM."""
   vm.RemoteCommand(f'sudo rm -rf {SYSBENCH_DIR}')
   if SYSBENCH_VERSION.value in RELEASE_TAGS:
@@ -78,18 +87,40 @@ def _Install(vm, spanner_oltp=False):
   if _IGNORE_CONCURRENT.value:
     driver_file = f'{SYSBENCH_DIR}/src/drivers/pgsql/drv_pgsql.c'
     vm.RemoteCommand(f"sed -i '{CONCURRENT_MODS}' {driver_file}")
+  without_mysql = ''
+  if (
+      DB_DRIVER_KEY in args
+      and args.get(DB_DRIVER_KEY) == 'pgsql'
+  ):
+    without_mysql = '--without-mysql'
   if spanner_oltp:
     vm.PushDataFile(
         'sysbench/spanner_oltp_git.diff',
         f'{SYSBENCH_DIR}/spanner_oltp_git.diff',
+    )
+    vm.PushDataFile(
+        'sysbench/spanner_oltp_write_only.diff',
+        f'{SYSBENCH_DIR}/spanner_oltp_write_only.diff',
     )
     vm.RemoteCommand(
         'cd ~/sysbench/ && git apply --reject --ignore-whitespace'
         ' spanner_oltp_git.diff'
     )
 
+    if _SYSBENCH_SPANNER_OLTP_COMMIT_DELAY.value:
+      vm.RemoteCommand(
+          f'sed -i "s/{SYSBENCH_COMMIT_DELAY}/'
+          f'{_SYSBENCH_SPANNER_OLTP_COMMIT_DELAY.value}/g" '
+          f'{SYSBENCH_DIR}/spanner_oltp_write_only.diff'
+      )
+      vm.RemoteCommand(
+          'cd ~/sysbench/ && git apply --reject --ignore-whitespace'
+          ' spanner_oltp_write_only.diff'
+      )
+
   vm.RemoteCommand(
       f'cd {SYSBENCH_DIR} && ./autogen.sh && ./configure --with-pgsql'
+      f' {without_mysql}'
   )
   vm.RemoteCommand(f'cd {SYSBENCH_DIR} && make -j && sudo make install')
 
@@ -99,26 +130,35 @@ def Uninstall(vm):
   vm.RemoteCommand(f'cd {SYSBENCH_DIR} && sudo make uninstall')
 
 
-def YumInstall(vm):
+def YumInstall(vm, args=immutabledict.immutabledict()):
   """Installs the sysbench package on the VM."""
   mariadb_pkg_name = 'mariadb-devel'
-  if vm.OS_TYPE in os_types.AMAZONLINUX_TYPES:
+  devel_pkg_name = 'postgresql-devel'
+  if (
+      DB_DRIVER_KEY in args
+      and args.get(DB_DRIVER_KEY) == 'pgsql'
+  ):
+    if vm.OS_TYPE in os_types.AMAZONLINUX_TYPES:
+      mariadb_pkg_name = ''
+    elif vm.OS_TYPE in os_types.CENTOS_TYPES:
+      devel_pkg_name = 'libpq-devel.x86_64'
+  elif vm.OS_TYPE in os_types.AMAZONLINUX_TYPES:
     # Use mysql-devel according to sysbench documentation.
     mariadb_pkg_name = 'mysql-devel'
   vm.InstallPackages(
       f'make automake libtool pkgconfig libaio-devel {mariadb_pkg_name} '
-      'openssl-devel postgresql-devel'
+      f'openssl-devel {devel_pkg_name}'
   )
-  _Install(vm)
+  _Install(vm, args=args)
 
 
-def AptInstall(vm, spanner_oltp=False):
+def AptInstall(vm, spanner_oltp=False, args=immutabledict.immutabledict()):
   """Installs the sysbench package on the VM."""
   vm.InstallPackages(
       'make automake libtool pkg-config libaio-dev default-libmysqlclient-dev '
       'libssl-dev libpq-dev'
   )
-  _Install(vm, spanner_oltp=spanner_oltp)
+  _Install(vm, spanner_oltp=spanner_oltp, args=args)
 
 
 def ParseSysbenchTimeSeries(sysbench_output, metadata) -> list[sample.Sample]:
@@ -230,9 +270,30 @@ def ParseSysbenchTransactions(sysbench_output, metadata) -> list[sample.Sample]:
   queries_per_second = regex_util.ExtractFloat(
       r'queries: *[0-9]* *\(([0-9]*[.]?[0-9]+) per sec.\)', sysbench_output
   )
+  # Associate the current latencies with the current transactions.
+  min_latency = regex_util.ExtractFloat(
+      'min: *([0-9]*[.]?[0-9]+)', sysbench_output)
+  average_latency = regex_util.ExtractFloat(
+      'avg: *([0-9]*[.]?[0-9]+)', sysbench_output)
+  max_latency = regex_util.ExtractFloat(
+      'max: *([0-9]*[.]?[0-9]+)', sysbench_output)
+  percentile_95_latency = None
+  try:
+    percentile_95_latency = regex_util.ExtractFloat(
+        '95th percentile: *([0-9]*[.]?[0-9]+)', sysbench_output
+    )
+  except regex_util.NoMatchError:
+    logging.info('P95 percentile not available in output.')
+
+  sample_metadata = metadata.copy()
+  sample_metadata['min_latency'] = min_latency
+  sample_metadata['average_latency'] = average_latency
+  sample_metadata['max_latency'] = max_latency
+  if percentile_95_latency:
+    sample_metadata['percentile_95_latency'] = percentile_95_latency
   return [
-      sample.Sample('tps', transactions_per_second, 'tps', metadata),
-      sample.Sample('qps', queries_per_second, 'qps', metadata),
+      sample.Sample('tps', transactions_per_second, 'tps', sample_metadata),
+      sample.Sample('qps', queries_per_second, 'qps', sample_metadata),
   ]
 
 
@@ -260,6 +321,7 @@ class SysbenchInputParameters:
   host_ip: str | None = None
   ssl_setting: str | None = None
   mysql_ignore_errors: str | None = None
+  port: int | None = None
 
 
 def _BuildGenericCommand(
@@ -293,9 +355,14 @@ def _BuildGenericCommand(
   if sysbench_parameters.skip_trx:
     cmd += ['--skip_trx=on']
   cmd += GetSysbenchDatabaseFlags(
-      sysbench_parameters.db_driver, sysbench_parameters.db_user,
-      sysbench_parameters.db_password, sysbench_parameters.db_name,
-      sysbench_parameters.host_ip, sysbench_parameters.ssl_setting)
+      sysbench_parameters.db_driver,
+      sysbench_parameters.db_user,
+      sysbench_parameters.db_password,
+      sysbench_parameters.db_name,
+      sysbench_parameters.host_ip,
+      sysbench_parameters.ssl_setting,
+      sysbench_parameters.port,
+  )
   return cmd
 
 
@@ -321,6 +388,7 @@ def GetSysbenchDatabaseFlags(
     db_name: str,
     host_ip: str,
     ssl_setting: str | None = None,  # only available in sysbench ver 1.1+
+    port: int | None = None,
 ) -> list[str]:
   """Returns the database flags for sysbench."""
   if db_driver == 'mysql':
@@ -332,6 +400,17 @@ def GetSysbenchDatabaseFlags(
         f'--mysql-password={db_password}',
         f'--mysql-db={db_name}',
         f'--mysql-host={host_ip}',
+    ]
+  elif db_driver == 'pgsql':
+    cmd = []
+    if ssl_setting:
+      cmd += [f'--pgsql-sslmode={ssl_setting}']
+    return cmd + [
+        f'--pgsql-user={db_user}',
+        f"--pgsql-password='{db_password}'",
+        f'--pgsql-db={db_name}',
+        f'--pgsql-host={host_ip}',
+        f'--pgsql-port={port}',
     ]
   return []
 
@@ -359,4 +438,8 @@ def GetMetadata(parameters: SysbenchInputParameters) -> dict[str, str]:
   for arg, value in args.items():
     if value is not None:
       metadata[arg] = str(value)
+  if _SYSBENCH_SPANNER_OLTP_COMMIT_DELAY.value:
+    metadata['sysbench_max_commit_delay'] = str(
+        _SYSBENCH_SPANNER_OLTP_COMMIT_DELAY.value
+    )
   return metadata

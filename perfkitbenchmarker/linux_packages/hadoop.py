@@ -48,6 +48,14 @@ _BLOCKSIZE_OVERRIDE = flags.DEFINE_integer(
     'This is the chunksize in which the HDFS file will be divided into.',
 )
 
+_DFS_REPLICATION_OVERRIDE = flags.DEFINE_integer(
+    'hadoop_hdfs_replication',
+    None,
+    'Default block replication. The actual number of replications can be '
+    'specified when the file is created. The default is used if replication is '
+    'not specified in create time.',
+)
+
 _HADOOP_NAMENODE_OPTS = flags.DEFINE_string(
     'hadoop_namenode_opts',
     None,
@@ -64,7 +72,7 @@ DATA_FILES = [
 ]
 START_HADOOP_SCRIPT = 'hadoop/start-hadoop.sh.j2'
 
-HADOOP_URL_BASE = 'https://downloads.apache.org/hadoop/common'
+HADOOP_URL_BASE = 'https://dlcdn.apache.org/hadoop/common'
 HADOOP_STABLE_URL = HADOOP_URL_BASE + '/stable'
 HADOOP_TAR_PATTERN = re.compile(r'hadoop-([0-9.]+)\.t(ar\.)?gz')
 
@@ -271,6 +279,7 @@ def _RenderConfig(
       'dfs_data_paths': dfs_data_paths,
       'mapreduce_cluster_local_paths': mapreduce_cluster_local_paths,
       'hadoop_namenode_opts': _HADOOP_NAMENODE_OPTS.value,
+      'dfs_replication': _DFS_REPLICATION_OVERRIDE.value,
   }
 
   for file_name in DATA_FILES:

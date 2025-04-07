@@ -76,8 +76,15 @@ GCE_NETWORK_NAMES = flags.DEFINE_list(
     'The name of an already created '
     'network to use instead of creating a new one.',
 )
-GCE_NETWORK_TYPE = flags.DEFINE_string(
-    'gce_network_type', None, 'The network type or mode (i.e. auto, custom)'
+GCE_NETWORK_TYPE = flags.DEFINE_enum(
+    'gce_network_type',
+    'auto',
+    [
+        'auto',
+        'custom',
+        'legacy',
+    ],
+    'The subnet mode of the network (i.e. auto, custom, legacy)',
 )
 GCE_SUBNET_NAMES = flags.DEFINE_list(
     'gce_subnet_name',
@@ -235,6 +242,10 @@ REDIS_NODE_TYPE = flags.DEFINE_enum(
     'gcp_redis_node_type',
     'redis-standard-small',
     [
+        'shared-core-nano',
+        'standard-small',
+        'highmem-medium',
+        'highmem-xlarge',
         'redis-shared-core-nano',
         'redis-standard-small',
         'redis-highmem-medium',
@@ -338,6 +349,7 @@ flags.DEFINE_enum(
         'SIMBA_JDBC_1_3_3_1004',
         'SIMBA_JDBC_1_5_0_1001',
         'SIMBA_JDBC_1_5_2_1005',
+        'PYTHON',
     ],
     'The Runtime Interface used when interacting with BigQuery.',
 )
@@ -355,6 +367,11 @@ CLOUD_REDIS_API_OVERRIDE = flags.DEFINE_string(
     'gcp_cloud_redis_api_override',
     default='https://redis.googleapis.com/',
     help='Cloud redis API endpoint override. Defaults to prod.',
+)
+CLOUD_VALKEY_API_OVERRIDE = flags.DEFINE_string(
+    'gcp_cloud_valkey_api_override',
+    default='https://memorystore.googleapis.com/',
+    help='Cloud valkey API endpoint override. Defaults to prod.',
 )
 GKE_API_OVERRIDE = flags.DEFINE_string(
     'gke_api_override',
@@ -427,6 +444,21 @@ SPARK_BIGQUERY_CONNECTOR = flags.DEFINE_string(
     'spark_bigquery_connector',
     None,
     'The Spark BigQuery Connector jar to pass to the Spark Job',
+)
+
+AI_USE_SDK = flags.DEFINE_bool(
+    'use_ai_sdk',
+    False,
+    'If True, use the AI python SDK to perform operations. Otherwise, use'
+    ' gcloud commands.',
+)
+
+AI_BUCKET_URI = flags.DEFINE_string(
+    'ai_bucket_uri',
+    None,
+    'If set, use this pre-existing bucket for model upload. Otherwise will'
+    ' create a bucket & copy needed information to it at runtime. Should not'
+    ' have a gs:// prefix.',
 )
 
 

@@ -30,6 +30,7 @@ SECOND = 'seconds'
 FLEXIBLE_SERVER_MYSQL = 'flexible-server-mysql'
 FLEXIBLE_SERVER_POSTGRES = 'flexible-server-postgres'
 
+TIMESCALEDB = 'timescaledb'
 OMNI = 'omni'
 MYSQL = 'mysql'
 MARIADB = 'mariadb'
@@ -45,6 +46,7 @@ SPANNER_POSTGRES = 'spanner-postgres'
 ALLOYDB = 'alloydb-postgresql'
 
 ALL_ENGINES = [
+    TIMESCALEDB,
     OMNI,
     MARIADB,
     MYSQL,
@@ -501,7 +503,7 @@ class SqlServerCliQueryTools(ISQLQueryTools):
       raise NotImplementedError(
           'Session variables is currently not supported in mysql'
       )
-    sqlserver_command = 'sqlcmd -S %s -U %s -P %s ' % (
+    sqlserver_command = 'sqlcmd -C -S %s -U %s -P %s ' % (
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
         self.connection_properties.database_password,
@@ -529,7 +531,7 @@ class SqlServerCliQueryTools(ISQLQueryTools):
     Returns:
        A tuple of stdout and stderr from running the command.
     """
-    sqlserver_command = '/opt/mssql-tools/bin/sqlcmd -S %s -U %s -P %s ' % (
+    sqlserver_command = '/opt/mssql-tools/bin/sqlcmd -C -S %s -U %s -P %s ' % (
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
         self.connection_properties.database_password,
@@ -567,7 +569,7 @@ def GetDbEngineType(db_engine: str) -> str:
       db_engine == AWS_AURORA_MYSQL_ENGINE or db_engine == FLEXIBLE_SERVER_MYSQL
   ):
     return MYSQL
-  elif db_engine == ALLOYDB or db_engine == OMNI:
+  elif db_engine == ALLOYDB or db_engine == OMNI or db_engine == TIMESCALEDB:
     return POSTGRES
   elif db_engine == SPANNER_POSTGRES:
     return SPANNER_POSTGRES

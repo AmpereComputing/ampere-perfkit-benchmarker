@@ -8,7 +8,7 @@ __Overview__ and complete the following 3 sections:
 
 *   [__Set up__](#set-up)
 *   [__Task 1. Install PerfKit Benchmarker__](#task-1-install-perfkit-benchmarker)
-*   [__Task 2. Start one benchmark test__](#task-2-start-one-benchmark-test)
+*   [__Task 2. Code Changes and Testing__](#task-2-code-changes-and-testing)
 *   [__Task 5. Explore the results of a benchmark test__](#task-5-explore-the-results-of-a-benchmark-test)
 
 ## Overview
@@ -55,10 +55,10 @@ PKB meets most of the needs of any end-to-end performance benchmarking project.
 
 Performance Benchmarking Process | PKB Architecture Stage
 -------------------------------- | ---------------------------------
-1. Identify criteria/problem     | Configuration
-2. Choose benchmark              | Configuration
-3. Execute benchmark tests       | Provisioning, Execution, Teardown
-4. Analyze test data             | Publish
+Identify criteria/problem     | Configuration
+Choose benchmark              | Configuration
+Execute benchmark tests       | Provisioning, Execution, Teardown
+Analyze test data             | Publish
 
 ## What you'll do
 
@@ -123,7 +123,7 @@ environment.
 This Cloud Shell virtual machine is loaded with all the development tools you'll
 need. It offers a persistent 5GB home directory, and runs on Google Cloud,
 greatly enhancing network performance and authentication. All of your work in
-this lab can be done within a browser on your Google Chromebook.
+this lab can be done within a browser on your laptop.
 
 Once connected to the Cloud Shell, you can verify your setup.
 
@@ -136,9 +136,10 @@ Once connected to the Cloud Shell, you can verify your setup.
     **Expected output**
 
     ```
-     Credentialed accounts:
-    ACTIVE  ACCOUNT
-    *       <myaccount>@<mydomain>.com
+    Credentialed accounts:
+
+    ACTIVE: *
+    ACCOUNT: <myaccount>@<mydomain>.com
     ```
 
     **Note:** `gcloud` is the powerful and unified command-line tool for Google
@@ -186,6 +187,36 @@ In Cloud Shell, disable OS Login for the project.
 gcloud compute project-info add-metadata --metadata enable-oslogin=FALSE
 ```
 
+### Set up python 3.11 virtual environment
+
+Perfkitbenchmarker requires python 3.11 to run. Default GCP cloud console comes with
+python 3.10. In this section, we will be installing python 3.11.
+
+1.  In Cloud Shell, run the following commands.
+
+    ```
+    # install pyenv to install python on persistent home directory
+    curl https://pyenv.run | bash
+
+    # add to path
+    echo 'export PATH="$HOME/.pyenv/bin:$PATH"' >> ~/.bashrc
+    echo 'eval "$(pyenv init -)"' >> ~/.bashrc
+    echo 'eval "$(pyenv virtualenv-init -)"' >> ~/.bashrc
+
+    # updating bashrc
+    source ~/.bashrc
+
+    # install python 3.11 and make default
+    pyenv install 3.11
+    pyenv global 3.11
+    ```
+
+1.  Verify that python 3.11 is installed:
+
+    ```
+    python -V
+    ```
+
 ## Task 1. Install PerfKit Benchmarker
 
 In this lab, you use Cloud Shell and the
@@ -195,7 +226,7 @@ In this lab, you use Cloud Shell and the
 
     ```
     sudo apt-get install python3-venv -y
-    python3 -m venv $HOME/my_virtualenv
+    python -m venv $HOME/my_virtualenv
     ```
 
     ```
@@ -208,10 +239,21 @@ In this lab, you use Cloud Shell and the
     export CLOUDSDK_PYTHON=$HOME/my_virtualenv/bin/python
     ```
 
-1.  Clone the PerfKitBenchmarker repository.
+1.  If you intend to submit pull requests, make a fork of the PerfKitBenchmarker
+    repository. This can be done in the Github UI or using the github repo fork
+    command. If using the fork command, reply 'Y' to cloning the repository and
+    follow the instructions on the screen for authentication.
 
     ```
-    cd $HOME && git clone https://github.com/GoogleCloudPlatform/PerfKitBenchmarker.git
+    gh repo fork GoogleCloudPlatform/PerfKitBenchmarker
+    ```
+
+1.  Clone the PerfKitBenchmarker repository if you did not clone the repository
+    in the previous step. If you did not make a fork, the github_username will
+    be GoogleCloudPlatform.
+
+    ```
+    cd $HOME && git clone https://github.com/{github_username}/PerfKitBenchmarker
     ```
 
     ```
@@ -223,6 +265,7 @@ In this lab, you use Cloud Shell and the
     ```
     pip install --upgrade pip
     pip install -r requirements.txt
+    pip install -r requirements-testing.txt
     ```
 
 > __Note__: As part of this lab, you will will run a few basic tests on Google
@@ -232,8 +275,46 @@ In this lab, you use Cloud Shell and the
 > reviewing the
 > [README in the PKB repo](https://github.com/GoogleCloudPlatform/PerfKitBenchmarker).
 
-## Task 2. Start one benchmark test
+## Task 2. Code Changes and Testing
 
+### Making a code change
+
+1.  Use the "Open Editor" button on the top bar of Cloud Shell (towards the
+    right side) to switch to IDE view. You can refer to
+    [Cloud Shell Editor](https://cloud.google.com/shell/docs/editor-overview) if
+    you need any help with the editor.
+
+1.  Make any necessary change and add a unit test for the change.
+
+1.  Run unit tests and make sure they succeed:
+
+    ```
+      python -m unittest discover -s tests -p '*test.py' -v
+    ```
+
+1.  For a single test, run
+
+    ```
+      python -m unittest discover -s tests -p '{test_file_name}' -v
+    ```
+
+1.  Run the pyink formatter on the file(s) that were changed.
+
+    Check the changed file for formatting without changing the file:
+
+    ```
+      pyink --pyink-indentation 2 --pyink-use-majority-quotes --unstable --line-length=80 --check --diff {file_path}
+    ```
+
+    Format the file:
+
+    ```
+      pyink --pyink-indentation 2 --pyink-use-majority-quotes --unstable --line-length=80 {file_path}
+    ```
+
+1.  Switch back to IDE mode and verify any formatting change that was made.
+
+### Benchmark Testing
 The `--benchmarks` flag is used to select the benchmark(s) run.
 
 Not supplying `--benchmarks` is the same as using `--benchmarks="standard_set"`,
@@ -253,7 +334,7 @@ __n1-standard-1__.
 __Expected duration__: ~13-14min.
 
 ```
-./pkb.py --benchmarks=iperf
+./pkb.py --benchmarks=iperf --machine_type=e2-micro
 ```
 
 > __Note__: while the `iperf` test is running, continue through both _Task 3_,
@@ -348,16 +429,6 @@ While __iperf__ is running, explore PKB benchmarks and flags.
     cd $HOME/PerfKitBenchmarker
     ```
 
-1.  Review all the global flags for PKB.
-
-    ```
-    ./pkb.py --helpmatch=pkb
-    ```
-
-    PKB includes the `--helpmatch` flag which can be used to discover details
-    about benchmarks and related configuration flags. You can pass `--helpmatch`
-    a regex and it will print related help text.
-
 1.  Review the full list of benchmarks available.
 
     ```
@@ -368,7 +439,7 @@ While __iperf__ is running, explore PKB benchmarks and flags.
     The `--benchmarks` flag, you used it previously, selects a specific
     benchmark or benchmark set.
 
-    You should see around 80 different benchmarks available to run, within the
+    You should see around 116+ different benchmarks available to run, within the
     linux_benchmarks and windows_benchmarks collections.
 
     PKB has a naming convention for benchmarks of

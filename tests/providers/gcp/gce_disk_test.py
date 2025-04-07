@@ -19,10 +19,8 @@ import contextlib
 import json
 import unittest
 from absl import flags
-from absl.testing import parameterized
 import mock
 from perfkitbenchmarker import context
-from perfkitbenchmarker import custom_virtual_machine_spec
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import virtual_machine
@@ -238,8 +236,14 @@ class GCEPDDiskTest(GCEDiskTest):
     fake_rets = [
         ('stdout', 'stderr', 0),
         ('stdout', 'stderr', 0),
-        ('20 20 201', 'stderr', 0),
+        (
+            'nvme version 2.8 (git 2.8)\nlibnvme version 1.8 (git 1.8)',
+            'stderr',
+            0,
+        ),
         ('', 'stderr', 0),
+        ('/dev/nvme0n1', 'stderr', 0),
+        ('0', 'stderr', 0),
         ('stdout', 'stderr', 0),
         ('stdout', 'stderr', 0),
         ('stdout', 'stderr', 0),
@@ -258,6 +262,8 @@ class GCEPDDiskTest(GCEDiskTest):
           ],
           ['sudo nvme --version'],
           ['sudo nvme list --output-format json'],
+          ['readlink -f /dev/disk/by-id/google-test_vm-data-0-0'],
+          ['mount | grep "/dev/nvme0n1 on /scratch" | wc -l'],
           [
               '[[ -d /mnt ]] && sudo umount /mnt; sudo mke2fs -F -E'
               ' lazy_itable_init=0,discard -O ^has_journal -t ext4 -b 4096'
@@ -293,8 +299,14 @@ class GCEPDDiskTest(GCEDiskTest):
         ('', '', 0),
         ('stdout', 'stderr', 0),
         ('stdout', 'stderr', 0),
-        ('20 20 201', 'stderr', 0),
+        (
+            'nvme version 2.8 (git 2.8)\nlibnvme version 1.8 (git 1.8)',
+            'stderr',
+            0,
+        ),
         ('', 'stderr', 0),
+        ('/dev/nvme0n1', 'stderr', 0),
+        ('0', 'stderr', 0),
         ('', 'stderr', 0),
         ('', 'stderr', 0),
         ('', 'stderr', 0),
@@ -373,6 +385,8 @@ class GCEPDDiskTest(GCEDiskTest):
           ],
           ['sudo nvme --version'],
           ['sudo nvme list --output-format json'],
+          ['readlink -f /dev/disk/by-id/google-test_vm-data-0-0'],
+          ['mount | grep "/dev/nvme0n1 on /scratch" | wc -l'],
           [
               '[[ -d /mnt ]] && sudo umount /mnt; sudo mke2fs -F -E'
               ' lazy_itable_init=0,discard -O ^has_journal -t ext4 -b 4096'
@@ -488,24 +502,6 @@ class GCENFSDiskTest(GCEDiskTest):
       self.assertEqual(
           self.linux_vm.scratch_disks[0].GetDevicePath(), '10.198.13.2:/vol0'
       )
-
-
-class DiskUtilTest(pkb_common_test_case.PkbCommonTestCase):
-
-  @parameterized.named_parameters(
-      (
-          'custom',
-          custom_virtual_machine_spec.CustomMachineTypeSpec(
-              _COMPONENT, cpus=1, memory='4.0GiB'
-          ),
-          gce_disk.PKB_DEFAULT_BOOT_DISK_TYPE,
-      ),
-      ('n2', 'n2-standard-2', gce_disk.PKB_DEFAULT_BOOT_DISK_TYPE),
-      ('c3a', 'c3a-standard-8', gce_disk.HYPERDISK_BALANCED),
-  )
-  def testGetDefaultBootDiskType(self, machine_type, expected_boot_disk_type):
-    boot_disk = gce_disk.GetDefaultBootDiskType(machine_type)
-    self.assertEqual(boot_disk, expected_boot_disk_type)
 
 
 if __name__ == '__main__':

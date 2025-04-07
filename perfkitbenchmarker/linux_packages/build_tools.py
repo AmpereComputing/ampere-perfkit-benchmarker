@@ -82,7 +82,7 @@ def BuildGccFromSource(vm, gcc_version):
   gcc_components = gcc_version.split('.')
   major = int(gcc_components[0])
   if major >= 13:
-    vm.InstallPackages('texinfo')
+    vm.Install('texinfo')
 
   # build GCC on scratch disks for speed if possible
   build_dir = vm.GetScratchDir() if vm.scratch_disks else '~/'
@@ -178,16 +178,16 @@ def Reinstall(vm, version: str):
     return
   vm.Install('ubuntu_toolchain')
   for pkg in ('gcc', 'gfortran', 'g++'):
-    version_string = GetVersion(vm, pkg)
-    if version_string.startswith(version):
-      logging.info('Have expected version of %s: %s', pkg, version_string)
+    current_version = GetVersion(vm, pkg)
+    if current_version.startswith(version):
+      logging.info('Have expected version of %s: %s', pkg, current_version)
       continue
     else:
       logging.info(
           'Built-in version of %s is incorrect: expected %s, but found %s',
           pkg,
-          version_string,
           version,
+          current_version,
       )
       new_pkg = pkg + '-' + version
       vm.InstallPackages(new_pkg)
@@ -200,6 +200,6 @@ def Reinstall(vm, version: str):
       logging.info(
           'Updated version of %s: Old: %s New: %s',
           pkg,
-          version_string,
+          current_version,
           GetVersion(vm, pkg),
       )

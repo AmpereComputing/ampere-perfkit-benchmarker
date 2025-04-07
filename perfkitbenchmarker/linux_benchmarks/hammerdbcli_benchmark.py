@@ -59,6 +59,31 @@ hammerdbcli:
       Azure:
         disk_size: 128
     vm_groups:
+      servers:
+        vm_spec:
+          GCP:
+            machine_type: n1-standard-16
+            zone: us-central1-c
+            boot_disk_size: 200
+          AWS:
+            machine_type: m4.4xlarge
+            zone: us-west-1a
+          Azure:
+            machine_type: Standard_B4ms
+            zone: westus
+        disk_spec: *default_500_gb
+      replications:
+        vm_spec:
+          GCP:
+            machine_type: n1-standard-16
+            zone: us-central1-b
+          AWS:
+            machine_type: m4.4xlarge
+            zone: us-east-1a
+          Azure:
+            machine_type: Standard_B4ms
+            zone: eastus
+        disk_spec: *default_500_gb
       clients:
         os_type: debian11
         vm_spec:
@@ -81,30 +106,6 @@ hammerdbcli:
           Azure:
             disk_size: 500
             disk_type: StandardSSD_LRS
-      servers:
-        vm_spec:
-          GCP:
-            machine_type: n1-standard-16
-            zone: us-central1-c
-          AWS:
-            machine_type: m4.4xlarge
-            zone: us-west-1a
-          Azure:
-            machine_type: Standard_B4ms
-            zone: westus
-        disk_spec: *default_500_gb
-      replications:
-        vm_spec:
-          GCP:
-            machine_type: n1-standard-16
-            zone: us-central1-b
-          AWS:
-            machine_type: m4.4xlarge
-            zone: us-east-1a
-          Azure:
-            machine_type: Standard_B4ms
-            zone: eastus
-        disk_spec: *default_500_gb
 """
 
 
@@ -127,7 +128,9 @@ def Prepare(benchmark_spec: bm_spec.BenchmarkSpec):
     benchmark_spec: The benchmark specification. Contains all data that is
       required to run the benchmark.
   """
-  vm = benchmark_spec.vms[0]
+  client_vms = benchmark_spec.vm_groups['clients']
+  assert len(client_vms) == 1
+  client_vm = client_vms[0]
   relational_db = benchmark_spec.relational_db
   db_engine = relational_db.engine
   num_cpus = None
@@ -142,7 +145,7 @@ def Prepare(benchmark_spec: bm_spec.BenchmarkSpec):
     # Use 28800, the default mysql timeout
     relational_db.SetDbConfiguration('wait_timeout', '28800')
 
-  vm.Install('hammerdb')
+  client_vm.Install('hammerdb')
   optimized_server_config = (
       hammerdb.HAMMERDB_OPTIMIZED_SERVER_CONFIGURATION.value
   )
@@ -165,7 +168,7 @@ def Prepare(benchmark_spec: bm_spec.BenchmarkSpec):
           custom_server_config,
       )
   hammerdb.SetupConfig(
-      vm=vm,
+      vm=client_vm,
       db_engine=db_engine,
       hammerdb_script=hammerdb.HAMMERDB_SCRIPT.value,
       ip=relational_db.endpoint,
@@ -341,7 +344,9 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   Raises:
     Exception: if the script is unknown
   """
-  vm = benchmark_spec.vms[0]
+  client_vms = benchmark_spec.vm_groups['clients']
+  assert len(client_vms) == 1
+  client_vm = client_vms[0]
   relational_db = benchmark_spec.relational_db
   num_cpus = None
   if hasattr(relational_db, 'server_vm'):
@@ -358,8 +363,10 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   samples = []
   for i in range(1, 1 + hammerdb.NUM_RUN.value):
     metadata['run_iteration'] = i
-    stdout = hammerdb.Run(vm, db_engine, script, timeout=timeout)
-    current_samples = hammerdb.ParseResults(script=script, stdout=stdout, vm=vm)
+    stdout = hammerdb.Run(client_vm, db_engine, script, timeout=timeout)
+    current_samples = hammerdb.ParseResults(
+        script=script, stdout=stdout, vm=client_vm
+    )
     if (
         db_engine == sql_engine_utils.ALLOYDB
         and relational_db.enable_columnar_engine_recommendation
@@ -373,9 +380,9 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
       )
       relational_db.WaitColumnarEnginePopulates(database_name)
       # Another prewarm
-      stdout = hammerdb.Run(vm, db_engine, script, timeout=timeout)
+      stdout = hammerdb.Run(client_vm, db_engine, script, timeout=timeout)
       current_samples = hammerdb.ParseResults(
-          script=script, stdout=stdout, vm=vm
+          script=script, stdout=stdout, vm=client_vm
       )
 
     for s in current_samples:

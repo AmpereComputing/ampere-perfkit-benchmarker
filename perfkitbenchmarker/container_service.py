@@ -27,11 +27,12 @@ import datetime
 import functools
 import ipaddress
 import itertools
+import json
 import logging
 import os
 import re
 import time
-from typing import Any, Sequence
+from typing import Any, Iterator, Optional, Sequence
 
 from absl import flags
 import jinja2
@@ -48,6 +49,7 @@ from perfkitbenchmarker import units
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import container_spec as container_spec_lib
+from perfkitbenchmarker.sample import Sample
 import requests
 import yaml
 
@@ -83,13 +85,6 @@ flags.DEFINE_boolean(
     'managed by PKB). If this is set, PKB will accept the '
     'image as fully qualified (including repository) and will '
     'not attempt to build it.',
-)
-
-flags.DEFINE_boolean(
-    'force_container_build',
-    False,
-    'Whether to force PKB to build container images even '
-    'if they already exist in the registry.',
 )
 
 flags.DEFINE_integer(
@@ -128,6 +123,14 @@ spec:
     servicePort: 8080
 """
 RESOURCE_DELETE_SLEEP_SECONDS = 5
+_RETRYABLE_KUBECTL_ERRORS = [
+    (
+        '"unable to decode an event from the watch stream: http2: client'
+        ' connection lost"'
+    ),
+    'read: connection reset by peer',
+    'Unable to connect to the server: dial tcp',
+]
 
 
 class ContainerException(errors.Error):
@@ -150,7 +153,7 @@ class RetriableContainerException(
   pass
 
 
-def RunKubectlCommand(command: list[str], **kwargs):
+def RunKubectlCommand(command: list[str], **kwargs) -> tuple[str, str, int]:
   """Run a kubectl command."""
   if 'stack_level' in kwargs:
     kwargs['stack_level'] += 1
@@ -159,6 +162,44 @@ def RunKubectlCommand(command: list[str], **kwargs):
     kwargs['stack_level'] = 2
   cmd = [FLAGS.kubectl, '--kubeconfig', FLAGS.kubeconfig] + command
   return vm_util.IssueCommand(cmd, **kwargs)
+
+
+class RetryableKubectlError(Exception):
+  """Exception for retryable kubectl errors."""
+
+
+def RunRetryableKubectlCommand(
+    run_cmd: list[str], timeout: int | None = None, **kwargs
+) -> tuple[str, str, int]:
+  """Runs a kubectl command, retrying somewhat exepected errors."""
+  if 'stack_level' in kwargs:
+    kwargs['stack_level'] += 1
+  else:
+    # IssueCommand defaults stack_level to 1, so 2 skips this function.
+    kwargs['stack_level'] = 2
+
+  @vm_util.Retry(
+      timeout=timeout,
+      retryable_exceptions=(RetryableKubectlError,),
+  )
+  def _RunRetryablePart(run_cmd: list[str], **kwargs):
+    """Inner function retries command so timeout can be passed to decorator."""
+    kwargs['stack_level'] += 1
+    out, err, code = RunKubectlCommand(
+        run_cmd, raise_on_failure=False, **kwargs
+    )
+    if err:
+      logging.warning('Got error %s when running %s', err, run_cmd)
+      for error_substring in _RETRYABLE_KUBECTL_ERRORS:
+        if error_substring in err:
+          raise RetryableKubectlError(
+              f'Tried running {run_cmd} but it failed with the substring'
+              f' {error_substring}. Retrying. Full error is: {err}'
+          )
+      raise errors.VmUtil.IssueCommandError(err)
+    return out, err, code
+
+  return _RunRetryablePart(run_cmd, timeout=timeout, **kwargs)
 
 
 class BaseContainer(resource.BaseResource):
@@ -324,14 +365,7 @@ class BaseContainerRegistry(resource.BaseResource):
       The full image name (including the registry).
     """
     full_image = self.GetFullRegistryTag(image)
-    # Log in to the registry to see if image exists
     self.Login()
-    if not FLAGS.force_container_build:
-      # manifest inspect inpspects the registry's copy
-      inspect_cmd = ['docker', 'manifest', 'inspect', full_image]
-      _, _, retcode = vm_util.IssueCommand(inspect_cmd, raise_on_failure=False)
-      if retcode == 0:
-        return full_image
     self._Build(image)
     return full_image
 
@@ -342,9 +376,9 @@ class BaseContainerRegistry(resource.BaseResource):
       image: The PKB name for the image (string).
     """
     image = ContainerImage(image)
-    build_start = time.time()
     if not FLAGS.local_container_build:
       try:
+        build_start = time.time()
         # Build the image remotely using an image building service.
         self.RemoteBuild(image)
         self.remote_build_times[image.name] = time.time() - build_start
@@ -352,6 +386,7 @@ class BaseContainerRegistry(resource.BaseResource):
       except NotImplementedError:
         pass
 
+    # TODO(pclay): Refactor ECR and remove.
     self.PrePush(image)
     # Build the image locally using docker.
     build_start = time.time()
@@ -630,6 +665,40 @@ class KubernetesPod:
     self.ip_address = pod.get('status', {}).get('podIP')
     return pod
 
+  def _ValidatePodHasNotFailed(self, status: dict[str, Any]):
+    """Raises an exception if the pod has failed."""
+    # Inspect the pod's status to determine if it succeeded, has failed, or is
+    # doomed to fail.
+    # https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/
+    phase = status['phase']
+    if phase == 'Succeeded':
+      return
+    elif phase == 'Failed':
+      raise FatalContainerException(
+          f'Pod {self.name} failed:\n{yaml.dump(status)}'
+      )
+    else:
+      for condition in status.get('conditions', []):
+        if (
+            condition['type'] == 'PodScheduled'
+            and condition['status'] == 'False'
+            and condition['reason'] == 'Unschedulable'
+        ):
+          # TODO(pclay): Revisit this when we scale clusters.
+          raise FatalContainerException(
+              f"Pod {self.name} failed to schedule:\n{condition['message']}"
+          )
+      for container_status in status.get('containerStatuses', []):
+        waiting_status = container_status['state'].get('waiting', {})
+        if waiting_status.get('reason') in [
+            'ErrImagePull',
+            'ImagePullBackOff',
+        ]:
+          raise FatalContainerException(
+              f'Failed to find container image for {self.name}:\n'
+              + yaml.dump(waiting_status.get('message'))
+          )
+
   def WaitForExit(self, timeout: int | None = None) -> dict[str, Any]:
     """Gets the finished running container."""
 
@@ -637,39 +706,13 @@ class KubernetesPod:
         timeout=timeout, retryable_exceptions=(RetriableContainerException,)
     )
     def _WaitForExit():
-      # Inspect the pod's status to determine if it succeeded, has failed, or is
-      # doomed to fail.
-      # https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/
       pod = self._GetPod()
       status = pod['status']
+      self._ValidatePodHasNotFailed(status)
       phase = status['phase']
       if phase == 'Succeeded':
         return pod
-      elif phase == 'Failed':
-        raise FatalContainerException(
-            f"Pod {self.name} failed:\n{yaml.dump(pod['status'])}"
-        )
       else:
-        for condition in status.get('conditions', []):
-          if (
-              condition['type'] == 'PodScheduled'
-              and condition['status'] == 'False'
-              and condition['reason'] == 'Unschedulable'
-          ):
-            # TODO(pclay): Revisit this when we scale clusters.
-            raise FatalContainerException(
-                f"Pod {self.name} failed to schedule:\n{condition['message']}"
-            )
-        for container_status in status.get('containerStatuses', []):
-          waiting_status = container_status['state'].get('waiting', {})
-          if waiting_status.get('reason') in [
-              'ErrImagePull',
-              'ImagePullBackOff',
-          ]:
-            raise FatalContainerException(
-                f'Failed to find container image for {status.name}:\n'
-                + yaml.dump(waiting_status.get('message'))
-            )
         raise RetriableContainerException(
             f'Pod phase ({phase}) not in finished phases.'
         )
@@ -693,6 +736,17 @@ class KubernetesContainer(KubernetesPod, BaseContainer):
         self.name,
         '--image=%s' % self.image,
         '--restart=Never',
+        # Allow scheduling on ARM nodes.
+        '--overrides',
+        json.dumps({
+            'spec': {
+                'tolerations': [{
+                    'operator': 'Exists',
+                    'key': 'kubernetes.io/arch',
+                    'effect': 'NoSchedule',
+                }]
+            }
+        }),
     ]
 
     limits = []
@@ -714,7 +768,9 @@ class KubernetesContainer(KubernetesPod, BaseContainer):
 
   def _IsReady(self):
     """Returns true if the container has stopped pending."""
-    return self._GetPod()['status']['phase'] != 'Pending'
+    status = self._GetPod()['status']
+    super()._ValidatePodHasNotFailed(status)
+    return status['phase'] != 'Pending'
 
 
 class KubernetesContainerService(BaseContainerService):
@@ -799,31 +855,438 @@ class KubernetesContainerService(BaseContainerService):
     RunKubectlCommand(delete_cmd, raise_on_failure=False)
 
 
-class KubernetesCluster(BaseContainerCluster):
-  """A Kubernetes flavor of Container Cluster."""
+class KubernetesClusterCommands:
+  """Implementation of many Kubernetes commands.
 
-  CLUSTER_TYPE = KUBERNETES
+  All methods just call generic kubectl commands without needing instance
+  information.
+  """
 
-  def _DeleteAllFromDefaultNamespace(self):
+  @staticmethod
+  def _DeleteAllFromDefaultNamespace():
     """Deletes all resources from a namespace.
 
     Since StatefulSets do not reclaim PVCs upon deletion, they are explicitly
     deleted here to prevent dynamically provisioned PDs from leaking once the
     cluster has been deleted.
     """
-    run_cmd = ['delete', 'all', '--all', '-n', 'default']
+    try:
+      # Delete deployments first as otherwise autorepair will redeploy deleted
+      # pods.
+      run_cmd = ['delete', 'deployment', '--all', '-n', 'default']
+      RunRetryableKubectlCommand(run_cmd)
+
+      timeout = 60 * 20
+      run_cmd = [
+          'delete',
+          'all',
+          '--all',
+          '-n',
+          'default',
+          f'--timeout={timeout}s',
+      ]
+      RunRetryableKubectlCommand(run_cmd, timeout=timeout)
+
+      run_cmd = ['delete', 'pvc', '--all', '-n', 'default']
+      RunKubectlCommand(run_cmd)
+      # There maybe a slight race if resources are cleaned up in the background
+      # where deleting the cluster immediately prevents the PVCs from being
+      # deleted.
+      logging.info(
+          'Sleeping for %s seconds to give resources time to delete.',
+          RESOURCE_DELETE_SLEEP_SECONDS,
+      )
+      time.sleep(RESOURCE_DELETE_SLEEP_SECONDS)
+    except errors.VmUtil.IssueCommandTimeoutError as e:
+      raise errors.Resource.RetryableDeletionError(
+          'Timed out while deleting all resources from default namespace. We'
+          ' should still continue trying to delete everything.'
+      ) from e
+
+  @staticmethod
+  def ApplyManifest(manifest_file: str, **kwargs) -> Iterator[str]:
+    """Applies a declarative Kubernetes manifest; possibly with jinja.
+
+    Args:
+      manifest_file: The name of the YAML file or YAML template.
+      **kwargs: Arguments to the jinja template.
+
+    Returns:
+      Names of the resources, e.g. [deployment.apps/mydeploy, pod/foo]
+    """
+
+    def _ParseApplyOutput(stdout: str) -> Iterator[str]:
+      """Parses the output of kubectl apply to get the name of the resource."""
+      # Example input: deployment.apps/pkb123 created
+      for line in stdout.splitlines():
+        match = re.search(r'([^\s/]+/[^\s/]+) created', line)
+        if match:
+          yield match.group(1)
+
+    filename = data.ResourcePath(manifest_file)
+    if not filename.endswith('.j2'):
+      assert not kwargs
+      out, _, _ = RunKubectlCommand(['apply', '-f', filename])
+      return _ParseApplyOutput(out)
+
+    environment = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    with open(filename) as template_file, vm_util.NamedTemporaryFile(
+        mode='w', suffix='.yaml'
+    ) as rendered_template:
+      manifest = environment.from_string(template_file.read()).render(kwargs)
+      rendered_template.write(manifest)
+      rendered_template.close()
+      out, _, _ = RunKubectlCommand(['apply', '-f', rendered_template.name])
+      return _ParseApplyOutput(out)
+
+  @staticmethod
+  def WaitForResource(
+      resource_name: str,
+      condition_name: str,
+      namespace: str | None = None,
+      timeout: int = vm_util.DEFAULT_TIMEOUT,
+      wait_for_all: bool = False,
+  ):
+    """Waits for a condition on a Kubernetes resource (eg: deployment, pod)."""
+    run_cmd = [
+        'wait',
+        f'--for=condition={condition_name}',
+        f'--timeout={timeout}s',
+        resource_name,
+    ]
+    if namespace:
+      run_cmd.append(f'--namespace={namespace}')
+    if wait_for_all:
+      run_cmd.append('--all')
+    RunKubectlCommand(run_cmd, timeout=timeout + 10)
+
+  @staticmethod
+  def WaitForSucceeded(
+      resource_name: str,
+      namespace: str | None = None,
+      timeout: int = vm_util.DEFAULT_TIMEOUT,
+      raise_on_failure: bool = True,
+  ) -> tuple[str, str, int]:
+    """Waits for a resource to complete (i.e. .status.phase=='Succeeded')."""
+    run_cmd = [
+        'wait',
+        '--for=jsonpath={.status.phase}=Succeeded',
+        f'--timeout={timeout}s',
+        resource_name,
+    ]
+    if namespace:
+      run_cmd.append(f'--namespace={namespace}')
+    return RunKubectlCommand(
+        run_cmd, timeout=timeout + 10, raise_on_failure=raise_on_failure
+    )
+
+  @staticmethod
+  def WaitForRollout(
+      resource_name: str, timeout: int = vm_util.DEFAULT_TIMEOUT
+  ):
+    """Blocks until a Kubernetes rollout is completed."""
+    run_cmd = [
+        'rollout',
+        'status',
+        '--timeout=%ds' % timeout,
+        resource_name,
+    ]
+
+    RunRetryableKubectlCommand(
+        run_cmd,
+        timeout=timeout,
+    )
+
+  @staticmethod
+  @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableCreationError,))
+  def GetLoadBalancerIP(service_name: str):
+    """Returns the IP address of a LoadBalancer service when ready."""
+    get_cmd = [
+        'get',
+        'service',
+        service_name,
+        '-o',
+        'jsonpath={.status.loadBalancer.ingress[0].ip}',
+    ]
+
+    stdout, _, _ = RunKubectlCommand(get_cmd)
+
+    try:
+      # Ensure the load balancer is ready by parsing the output IP
+      ip_address = ipaddress.ip_address(stdout)
+    except ValueError:
+      raise errors.Resource.RetryableCreationError(
+          "Load Balancer IP for service '%s' is not ready." % service_name
+      )
+
+    return format(ip_address)
+
+  @staticmethod
+  @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableCreationError,))
+  def GetClusterIP(service_name: str) -> str:
+    """Returns the IP address of a ClusterIP service when ready."""
+    get_cmd = [
+        'get',
+        'service',
+        service_name,
+        '-o',
+        'jsonpath={.spec.clusterIP}',
+    ]
+
+    stdout, _, _ = RunKubectlCommand(get_cmd)
+
+    if not stdout:
+      raise errors.Resource.RetryableCreationError(
+          "ClusterIP for service '%s' is not ready." % service_name
+      )
+
+    return stdout
+
+  @staticmethod
+  def GetNumReplicasSamples(
+      resource_name: str, namespace: Optional[str] = None
+  ) -> list[Sample]:
+    """Returns a count of the replias (and state) for the specified resource.
+
+    The number of ready and unready replicas should always sum to the total
+    replicas.
+
+    Args:
+      resource_name: The deployment/statefulset/etc's name, e.g.
+        'deployment/my_deployment'.
+      namespace: The namespace of the resource. If omitted, the 'default'
+        namespace will be used.
+
+    Returns:
+      A list of the (total replicas, ready replicas, unready replicas) for this
+      resource (as `Sample`s), or an empty list if the resource cannot be found.
+    """
+    now = int(time.time())
+    if namespace is None:
+      namespace = 'default'
+    stdout, stderr, retcode = RunKubectlCommand(
+        [
+            'get',
+            resource_name,
+            '-n',
+            namespace,
+            "-o=jsonpath='{.status.replicas}, {.status.readyReplicas}'",
+        ],
+        raise_on_failure=False,
+    )
+    if retcode != 0:
+      if re.match('^Error from server \\(NotFound\\):.*', stderr) is not None:
+        # The specified resource wasn't found
+        return []
+      else:
+        # Some other error.
+        raise errors.VmUtil.IssueCommandError(
+            f'Unable to query list of replicas: {stderr}'
+        )
+
+    stdout = stdout.strip("' ")
+    replicas = int(stdout.split(',')[0])
+    ready_replicas = int(stdout.split(',')[1])
+    unready_replicas = replicas - ready_replicas
+
+    def _Sample(count: int, state: str) -> Sample:
+      return Sample(
+          metric='k8s/num_replicas_' + state,
+          value=count,
+          unit='',
+          metadata={
+              'namespace': namespace,
+              'resource_name': resource_name,
+          },
+          timestamp=now,
+      )
+
+    return [
+        _Sample(replicas, 'any'),
+        _Sample(ready_replicas, 'ready'),
+        _Sample(unready_replicas, 'unready'),
+    ]
+
+  @staticmethod
+  def GetNumNodesSamples() -> list[Sample]:
+    """Returns a count of nodes in each state for the cluster.
+
+    The number of ready, unready, and unknown nodes should always sum to the
+    total nodes.
+
+    Returns:
+      A List of the (total nodes, ready nodes, unready nodes, unknown nodes)
+      for this cluster as `Sample`s.
+    """
+    now = int(time.time())
+
+    jsonpath = (
+        '{range .items[*]}'
+        '{@.status.conditions[?(@.type=="Ready")].status}{"\\n"}'
+        '{end}'
+    )
+    stdout, _, _ = RunKubectlCommand(
+        ['get', 'nodes', f"-o=jsonpath='{jsonpath}'"]
+    )
+
+    total = ready = unready = unknown = 0
+    for line in stdout.splitlines():
+      status = line.strip("' ").lower()
+      if not status:
+        continue
+      elif status == 'true':
+        ready += 1
+      elif status == 'false':
+        unready += 1
+      else:
+        # status should be strictly 'unknown', but we'll also categorize any
+        # other unexpected response as 'unknown'
+        unknown += 1
+      total += 1
+
+    def _Sample(count: int, state: str) -> Sample:
+      # TOCONSIDER: maybe include the nodepool name in the metadata?
+      return Sample(
+          metric='k8s/num_nodes_' + state,
+          value=count,
+          unit='',
+          metadata={},
+          timestamp=now,
+      )
+
+    return [
+        _Sample(total, 'any'),
+        _Sample(ready, 'ready'),
+        _Sample(unready, 'unready'),
+        _Sample(unknown, 'unknown'),
+    ]
+
+  @staticmethod
+  def CreateConfigMap(name: str, from_file_dir: str):
+    """Creates a Kubernetes ConfigMap.
+
+    Args:
+      name: The name of the ConfigMap to create
+      from_file_dir: The directory name containing files that will be key/values
+        in the ConfigMap
+    """
+    RunKubectlCommand(
+        ['create', 'configmap', name, '--from-file', from_file_dir]
+    )
+
+  @staticmethod
+  def CreateServiceAccount(
+      name: str, clusterrole: str | None = None, namespace='default'
+  ):
+    """Create a k8s service account and cluster-role-binding."""
+    RunKubectlCommand(
+        ['create', 'serviceaccount', name, '--namespace', namespace]
+    )
+    if clusterrole:
+      # TODO(pclay): Support customer cluster roles?
+      RunKubectlCommand([
+          'create',
+          'clusterrolebinding',
+          f'{name}-role',
+          f'--clusterrole={clusterrole}',
+          f'--serviceaccount={namespace}:{name}',
+          '--namespace',
+          namespace,
+      ])
+
+  @property
+  @functools.lru_cache(maxsize=1)
+  def k8s_version(self) -> str:
+    """Actual Kubernetes version reported by server."""
+    stdout, _, _ = RunKubectlCommand(['version', '-o', 'yaml'])
+    return yaml.safe_load(stdout)['serverVersion']['gitVersion']
+
+  @staticmethod
+  def GetPodLabel(resource_name):
+    run_cmd = [
+        'get',
+        resource_name,
+        '-o',
+        'jsonpath="{.spec.selector.matchLabels.app}"',
+    ]
+
+    stdout, _, _ = RunKubectlCommand(run_cmd)
+    return yaml.safe_load(stdout)
+
+  @staticmethod
+  def GetPodIpsByLabel(pod_label_key, pod_label_value) -> list[str]:
+    """Returns a list of internal IPs for pod label key-value.
+
+    Args:
+      pod_label_key: The pod label name
+      pod_label_value: The pod label value
+    """
+    get_cmd = [
+        'get',
+        'pods',
+        '-l',
+        f'{pod_label_key}={pod_label_value}',
+        '-o',
+        'jsonpath="{.items[*].status.podIP}"',
+    ]
+
+    stdout, _, _ = RunKubectlCommand(get_cmd)
+    return yaml.safe_load(stdout).split()
+
+  @staticmethod
+  def GetPodIps(resource_name) -> list[str]:
+    """Returns a list of internal IPs for a pod name.
+
+    Args:
+      resource_name: The pod resource name
+    """
+    pod_label = KubernetesClusterCommands.GetPodLabel(resource_name)
+    return KubernetesClusterCommands.GetPodIpsByLabel('app', pod_label)
+
+  @staticmethod
+  def GetPodNames() -> list[str]:
+    """Returns all pod names in the cluster."""
+    return KubernetesClusterCommands.GetAllNamesForResourceType('pods')
+
+  @staticmethod
+  def GetNodeNames() -> list[str]:
+    """Get the node names for the cluster."""
+    return KubernetesClusterCommands.GetAllNamesForResourceType('nodes')
+
+  @staticmethod
+  def GetAllNamesForResourceType(resource_type: str) -> list[str]:
+    """Get all names for the specified resource. Type should be plural."""
+    stdout, _, _ = RunKubectlCommand(
+        ['get', resource_type, '-o', 'jsonpath={.items[*].metadata.name}']
+    )
+    return stdout.split()
+
+  @staticmethod
+  def RunKubectlExec(pod_name, cmd):
+    run_cmd = ['exec', '-it', pod_name, '--'] + cmd
     RunKubectlCommand(run_cmd)
 
-    run_cmd = ['delete', 'pvc', '--all', '-n', 'default']
-    RunKubectlCommand(run_cmd)
-    # There maybe a slight race if resources are cleaned up in the background
-    # where deleting the cluster immediately prevents the PVCs from being
-    # deleted.
-    logging.info(
-        'Sleeping for %s seconds to give resources time to delete.',
-        RESOURCE_DELETE_SLEEP_SECONDS,
-    )
-    time.sleep(RESOURCE_DELETE_SLEEP_SECONDS)
+  @staticmethod
+  def _GetPvcs() -> Sequence[Any]:
+    stdout, _, _ = RunKubectlCommand(['get', 'pvc', '-o', 'yaml'])
+    return yaml.safe_load(stdout)['items']
+
+  @staticmethod
+  def GetEvents():
+    """Get the events for the cluster."""
+    stdout, _, _ = RunKubectlCommand(['get', 'events', '-o', 'yaml'])
+    k8s_events = []
+    for item in yaml.safe_load(stdout)['items']:
+      k8s_event = KubernetesEvent.FromDict(item)
+      if k8s_event:
+        k8s_events.append(k8s_event)
+    return k8s_events
+
+
+class KubernetesCluster(BaseContainerCluster, KubernetesClusterCommands):
+  """A Kubernetes flavor of Container Cluster."""
+
+  CLUSTER_TYPE = KUBERNETES
 
   def _Delete(self):
     self._DeleteAllFromDefaultNamespace()
@@ -853,132 +1316,6 @@ class KubernetesCluster(BaseContainerCluster):
     self.services[name] = service
     service.Create()
 
-  # TODO(pclay): Revisit instance methods that don't rely on instance data.
-  def ApplyManifest(self, manifest_file: str, **kwargs):
-    """Applies a declarative Kubernetes manifest; possibly with jinja.
-
-    Args:
-      manifest_file: The name of the YAML file or YAML template.
-      **kwargs: Arguments to the jinja template.
-    """
-    filename = data.ResourcePath(manifest_file)
-    if not filename.endswith('.j2'):
-      assert not kwargs
-      RunKubectlCommand(['apply', '-f', filename])
-      return
-
-    environment = jinja2.Environment(undefined=jinja2.StrictUndefined)
-    with open(filename) as template_file, vm_util.NamedTemporaryFile(
-        mode='w', suffix='.yaml'
-    ) as rendered_template:
-      manifest = environment.from_string(template_file.read()).render(kwargs)
-      rendered_template.write(manifest)
-      rendered_template.close()
-      RunKubectlCommand(['apply', '-f', rendered_template.name])
-
-  def WaitForResource(
-      self,
-      resource_name: str,
-      condition_name: str,
-      namespace: str | None = None,
-      timeout: int = vm_util.DEFAULT_TIMEOUT,
-  ):
-    """Waits for a condition on a Kubernetes resource (eg: deployment, pod)."""
-    run_cmd = [
-        'wait',
-        f'--for=condition={condition_name}',
-        f'--timeout={timeout}s',
-        resource_name,
-    ]
-    if namespace:
-      run_cmd.append(f'--namespace={namespace}')
-    RunKubectlCommand(run_cmd, timeout=timeout + 10)
-
-  def WaitForRollout(self, resource_name: str):
-    """Blocks until a Kubernetes rollout is completed."""
-    run_cmd = [
-        'rollout',
-        'status',
-        '--timeout=%ds' % vm_util.DEFAULT_TIMEOUT,
-        resource_name,
-    ]
-
-    RunKubectlCommand(run_cmd)
-
-  @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableCreationError,))
-  def GetLoadBalancerIP(self, service_name: str):
-    """Returns the IP address of a LoadBalancer service when ready."""
-    get_cmd = [
-        'get',
-        'service',
-        service_name,
-        '-o',
-        'jsonpath={.status.loadBalancer.ingress[0].ip}',
-    ]
-
-    stdout, _, _ = RunKubectlCommand(get_cmd)
-
-    try:
-      # Ensure the load balancer is ready by parsing the output IP
-      ip_address = ipaddress.ip_address(stdout)
-    except ValueError:
-      raise errors.Resource.RetryableCreationError(
-          "Load Balancer IP for service '%s' is not ready." % service_name
-      )
-
-    return format(ip_address)
-
-  @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableCreationError,))
-  def GetClusterIP(self, service_name: str) -> str:
-    """Returns the IP address of a ClusterIP service when ready."""
-    get_cmd = [
-        'get',
-        'service',
-        service_name,
-        '-o',
-        'jsonpath={.spec.clusterIP}',
-    ]
-
-    stdout, _, _ = RunKubectlCommand(get_cmd)
-
-    if not stdout:
-      raise errors.Resource.RetryableCreationError(
-          "ClusterIP for service '%s' is not ready." % service_name
-      )
-
-    return stdout
-
-  def CreateConfigMap(self, name: str, from_file_dir: str):
-    """Creates a Kubernetes ConfigMap.
-
-    Args:
-      name: The name of the ConfigMap to create
-      from_file_dir: The directory name containing files that will be key/values
-        in the ConfigMap
-    """
-    RunKubectlCommand(
-        ['create', 'configmap', name, '--from-file', from_file_dir]
-    )
-
-  def CreateServiceAccount(
-      self, name: str, clusterrole: str | None = None, namespace='default'
-  ):
-    """Create a k8s service account and cluster-role-binding."""
-    RunKubectlCommand(
-        ['create', 'serviceaccount', name, '--namespace', namespace]
-    )
-    if clusterrole:
-      # TODO(pclay): Support customer cluster roles?
-      RunKubectlCommand([
-          'create',
-          'clusterrolebinding',
-          f'{name}-role',
-          f'--clusterrole={clusterrole}',
-          f'--serviceaccount={namespace}:{name}',
-          '--namespace',
-          namespace,
-      ])
-
   # TODO(pclay): Move to cached property in Python 3.9
   @property
   @functools.lru_cache(maxsize=1)
@@ -999,85 +1336,14 @@ class KubernetesCluster(BaseContainerCluster):
     )
     return int(stdout)
 
-  @property
-  @functools.lru_cache(maxsize=1)
-  def k8s_version(self) -> str:
-    """Actual Kubernetes version reported by server."""
-    stdout, _, _ = RunKubectlCommand(['version', '-o', 'yaml'])
-    return yaml.safe_load(stdout)['serverVersion']['gitVersion']
-
-  def GetPodLabel(self, resource_name):
-    run_cmd = [
-        'get',
-        resource_name,
-        '-o',
-        'jsonpath="{.spec.selector.matchLabels.app}"',
-    ]
-
-    stdout, _, _ = RunKubectlCommand(run_cmd)
-    return yaml.safe_load(stdout)
-
-  def GetPodIpsByLabel(self, pod_label_key, pod_label_value) -> list[str]:
-    """Returns a list of internal IPs for pod label key-value.
-
-    Args:
-      pod_label_key: The pod label name
-      pod_label_value: The pod label value
-    """
-    get_cmd = [
-        'get',
-        'pods',
-        '-l',
-        f'{pod_label_key}={pod_label_value}',
-        '-o',
-        'jsonpath="{.items[*].status.podIP}"',
-    ]
-
-    stdout, _, _ = RunKubectlCommand(get_cmd)
-    return yaml.safe_load(stdout).split()
-
-  def GetPodIps(self, resource_name) -> list[str]:
-    """Returns a list of internal IPs for a pod name.
-
-    Args:
-      resource_name: The pod resource name
-    """
-    pod_label = self.GetPodLabel(resource_name)
-    return self.GetPodIpsByLabel('app', pod_label)
-
-  def RunKubectlExec(self, pod_name, cmd):
-    run_cmd = ['exec', '-it', pod_name, '--'] + cmd
-    RunKubectlCommand(run_cmd)
-
   def LabelDisks(self):
     """Propagate cluster labels to disks if not done by cloud provider."""
     pass
-
-  def _GetPvcs(self) -> Sequence[Any]:
-    stdout, _, _ = RunKubectlCommand(['get', 'pvc', '-o', 'yaml'])
-    return yaml.safe_load(stdout)['items']
 
   # TODO(pclay): integrate with kubernetes_disk.
   def GetDefaultStorageClass(self) -> str:
     """Get the default storage class for the provider."""
     raise NotImplementedError
-
-  def GetNodeNames(self) -> list[str]:
-    """Get the node names for the cluster."""
-    stdout, _, _ = RunKubectlCommand(
-        ['get', 'nodes', '-o', 'jsonpath={.items[*].metadata.name}']
-    )
-    return stdout.split()
-
-  def GetEvents(self):
-    """Get the events for the cluster."""
-    stdout, _, _ = RunKubectlCommand(['get', 'events', '-o', 'yaml'])
-    k8s_events = []
-    for item in yaml.safe_load(stdout)['items']:
-      k8s_event = KubernetesEvent.FromDict(item)
-      if k8s_event:
-        k8s_events.append(k8s_event)
-    return k8s_events
 
 
 @dataclasses.dataclass
@@ -1108,19 +1374,27 @@ class KubernetesEvent:
     """Parse Kubernetes Event YAML output."""
     if 'message' not in yaml_data:
       return
-    # There are multiple timestamps. They should be equivalent.
-    raw_timestamp = yaml_data['lastTimestamp']
-    assert raw_timestamp
-    # Python 3.10 cannot handle Z as utc in ISO 8601 timestamps
-    python_3_10_compatible_timestamp = re.sub('Z$', '+00:00', raw_timestamp)
-    timestamp = calendar.timegm(
-        datetime.datetime.fromisoformat(
-            python_3_10_compatible_timestamp
-        ).timetuple()
-    )
-    return cls(
-        message=yaml_data['message'],
-        reason=yaml_data.get('reason'),
-        resource=KubernetesEventResource.FromDict(yaml_data['involvedObject']),
-        timestamp=timestamp,
-    )
+    try:
+      # There are multiple timestamps. They should be equivalent.
+      raw_timestamp = yaml_data['lastTimestamp']
+      assert raw_timestamp
+      # Python 3.10 cannot handle Z as utc in ISO 8601 timestamps
+      python_3_10_compatible_timestamp = re.sub('Z$', '+00:00', raw_timestamp)
+      timestamp = calendar.timegm(
+          datetime.datetime.fromisoformat(
+              python_3_10_compatible_timestamp
+          ).timetuple()
+      )
+      return cls(
+          message=yaml_data['message'],
+          reason=yaml_data.get('reason'),
+          resource=KubernetesEventResource.FromDict(
+              yaml_data['involvedObject']
+          ),
+          timestamp=timestamp,
+      )
+    except KeyError as e:
+      logging.exception(
+          'Tried parsing event: %s but ran into error: %s', yaml_data, e
+      )
+      raise e

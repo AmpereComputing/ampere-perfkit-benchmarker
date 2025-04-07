@@ -12,9 +12,8 @@ import logging
 import re
 from typing import Any
 from absl import flags
-from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import vm_util
+from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker.providers.aws import util
 from perfkitbenchmarker.resources import managed_ai_model
 from perfkitbenchmarker.resources import managed_ai_model_spec
@@ -38,6 +37,8 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
     account_id: The AWS account id.
     endpoint_name: The name of the deployed endpoint, if initialized.
     execution_arn: The role the model uses to run.
+    vm: A vm to run commands on.
+    python_script: The path to the helper python script.
   """
 
   CLOUD = 'AWS'
@@ -50,11 +51,15 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
   account_id: str
   endpoint_name: str | None
   execution_arn: str
+  python_script: str
 
   def __init__(
-      self, model_spec: managed_ai_model_spec.BaseManagedAiModelSpec, **kwargs
+      self,
+      vm: virtual_machine.BaseVirtualMachine,
+      model_spec: managed_ai_model_spec.BaseManagedAiModelSpec,
+      **kwargs,
   ):
-    super().__init__(**kwargs)
+    super().__init__(model_spec, vm, **kwargs)
     if not isinstance(model_spec, JumpStartModelSpec):
       raise errors.Config.InvalidValue(
           f'Invalid model spec class: "{model_spec.__class__.__name__}". '
@@ -72,11 +77,13 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
     self.endpoint_name = None
     self.metadata.update({
         'model_name': self.model_name,
+        'model_size': self.model_spec.model_size,
     })
+    self.python_script = ''
 
   def _InitializeNewModel(self) -> 'JumpStartModelInRegistry':
     """Returns a new instance of the same class."""
-    return self.__class__(model_spec=self.model_spec)
+    return self.__class__(vm=self.vm, model_spec=self.model_spec)
 
   def GetRegionFromZone(self, zone: str) -> str:
     return util.GetRegionFromZone(zone)
@@ -85,7 +92,7 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
     """Returns list of endpoint names."""
     if region is None:
       region = self.region
-    out, _, _ = vm_util.IssueCommand(
+    out, _, _ = self.vm.RunCommand(
         ['aws', 'sagemaker', 'list-endpoints', f'--region={region}']
     )
     out_json = json.loads(out)
@@ -96,7 +103,7 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
     return endpoints
 
   def _RunPythonScript(self, args: list[str]) -> tuple[str, str]:
-    """Calls the on-runner-vm python script with appropriate arguments.
+    """Calls the on-client-vm python script with appropriate arguments.
 
     We do this rather than just run the python code in this file to avoid
     importing the AWS libraries.
@@ -106,25 +113,25 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
     Returns:
       Tuple of [stdout, stderr].
     """
-    python_script = data.ResourcePath(AWS_RUNNER_SCRIPT)
-    # When run without the region variable, get the error:
-    # "ARN should be scoped to correct region: us-west-2"
-    env_vars = {'AWS_DEFAULT_REGION': self.region}
-    out, err, _ = vm_util.IssueCommand(
-        [
-            'python3',
-            python_script,
-            # These arguments are needed for all operations.
-            f'--region={self.region}',
-            f'--model_id={self.model_id}',
-            f'--model_version={self.model_version}',
-        ]
-        + args,
-        env=env_vars,
+    out, err, _ = self.vm.RunCommand(
+        self._GetPythonScriptCommand(args),
         raise_on_failure=False,
         timeout=60 * 30,
+        stack_level=2,
     )
     return out, err
+
+  def _GetPythonScriptCommand(self, args: list[str]) -> str:
+    """Returns the command to run the python script with the given args."""
+    # When run without the region variable, get the error:
+    # "ARN should be scoped to correct region: us-west-2"
+    return (
+        f'export AWS_DEFAULT_REGION={self.region} && '
+        # These arguments are needed for all operations.
+        'python3'
+        f' {self.python_script} --region={self.region} --model_id={self.model_id} '
+        f'--model_version={self.model_version} ' + ' '.join(args)
+    )
 
   def _SendPrompt(
       self, prompt: str, max_tokens: int, temperature: float, **kwargs: Any
@@ -145,25 +152,60 @@ class JumpStartModelInRegistry(managed_ai_model.BaseManagedAiModel):
       )
     return [matches.group(1)]
 
+  def GetPromptCommand(
+      self, prompt: str, max_tokens: int, temperature: float, **kwargs: Any
+  ) -> str:
+    return self._GetPythonScriptCommand([
+        '--operation=prompt',
+        f'--endpoint_name={self.endpoint_name}',
+        f'--prompt={prompt}',
+        f'--max_tokens={max_tokens}',
+        f'--temperature={temperature}',
+    ])
+
   def _Create(self) -> None:
     """Creates the underlying resource."""
     logging.info('Creating Jump Start Model: %s', self.model_id)
     out, err = self._RunPythonScript(
         ['--operation=create', f'--role={self.execution_arn}']
     )
+
     # TODO(user): Handle errors rather than swallowing them.
     # Unfortunately even a correct run gives some errors.
-    matches = re.search('Endpoint name: <(.+?)>', out)
-    if not matches:
-      raise errors.Resource.CreationError(
-          'Could not find endpoint name in python create output.\nStdout:'
-          f' {out}\nStderr:{err}',
-      )
-    self.endpoint_name = matches.group(1)
+    def _FindNameMatch(out: str, resource_type: str) -> str:
+      """Finds the name of the resource in the output of the python script."""
+      matches = re.search(f'{resource_type}: <(.+?)>', out)
+      if not matches:
+        raise errors.Resource.CreationError(
+            f'Could not find {resource_type} in python create output.\nStdout:'
+            f' {out}\nStderr:{err}',
+        )
+      return matches.group(1)
+
+    self.endpoint_name = _FindNameMatch(out, 'Endpoint name')
+    self.model_name = _FindNameMatch(out, 'Model name')
+
+  def _PostCreate(self) -> None:
+    """Adds tags after creation timing."""
+    self._AddTags('endpoint', self.endpoint_name)
+    self._AddTags('model', self.model_name)
+
+  def _AddTags(self, resource_type: str, resource_name: str) -> None:
+    """Adds tags to the resource with the given type & name."""
+    arn = f'arn:aws:sagemaker:{self.region}:{self.account_id}:{resource_type}/{resource_name}'
+    cmd = (
+        f'aws sagemaker add-tags --region={self.region} --resource-arn={arn} '
+        + '--tags '
+        + ' '.join(util.MakeFormattedDefaultTags())
+    )
+    self.vm.RunCommand(cmd)
 
   def _CreateDependencies(self) -> None:
-    vm_util.IssueCommand(['pip', 'install', 'sagemaker'])
-    vm_util.IssueCommand(['pip', 'install', 'absl-py'])
+    self.vm.Install('pip')
+    self.vm.Install('awscli')
+    self.vm.RunCommand('pip install sagemaker')
+    self.vm.RunCommand('pip install absl-py')
+    self.python_script = self.vm.PrepareResourcePath(AWS_RUNNER_SCRIPT)
 
   def _Delete(self) -> None:
     """Deletes the underlying resource."""
@@ -189,16 +231,17 @@ class JumpStartModelSpec(managed_ai_model_spec.BaseManagedAiModelSpec):
     self.model_version: str
 
 
-class JumpStartLlama27bSpec(JumpStartModelSpec):
-  """Spec for running the Llama2 7b model.
+class JumpStartLlama2Spec(JumpStartModelSpec):
+  """Spec for running the Llama2 model.
 
   Source is this python notebook:
   https://github.com/aws/amazon-sagemaker-examples/blob/main/introduction_to_amazon_algorithms/jumpstart-foundation-models/llama-2-text-completion.ipynb
   """
 
-  MODEL_NAME = 'llama2_7b'
+  MODEL_NAME = 'llama2'
+  MODEL_SIZE = ['7b', '70b']
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
     super().__init__(component_full_name, flag_values=flag_values, **kwargs)
-    self.model_id = 'meta-textgeneration-llama-2-7b-f'
+    self.model_id = f'meta-textgeneration-llama-2-{self.model_size}-f'
     self.model_version = '2.*'

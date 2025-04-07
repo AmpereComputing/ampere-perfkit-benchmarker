@@ -63,6 +63,7 @@ from perfkitbenchmarker.configs import freeze_restore_spec
 from perfkitbenchmarker.resources import base_job
 from perfkitbenchmarker.resources import example_resource
 from perfkitbenchmarker.resources import managed_ai_model
+from perfkitbenchmarker.resources.pinecone import pinecone as pinecone_resource
 import six
 import six.moves._thread
 import six.moves.copyreg
@@ -111,6 +112,12 @@ flags.DEFINE_integer(
     'create_and_boot_post_task_delay',
     None,
     'Delay in seconds to delay in between boot tasks.',
+)
+_ENFORCE_DISK_MOUNT_POINT_OVERRIDE = flags.DEFINE_bool(
+    'enforce_disk_mount_point_override',
+    False,
+    'Enforce the use of the --scratch_dir flag to override the default'
+    ' mount_point in the disk spec.',
 )
 # pyformat: disable
 # TODO(user): Delete this flag after fulling updating gcl.
@@ -172,7 +179,7 @@ class BenchmarkSpec:
     self.uuid = '%s-%s' % (FLAGS.run_uri, uuid.uuid4())
     self.always_call_cleanup = pkb_flags.ALWAYS_CALL_CLEANUP.value
     self.dpb_service: dpb_service.BaseDpbService = None
-    self.container_cluster = None
+    self.container_cluster: container_service.BaseContainerCluster = None
     self.key = None
     self.relational_db = None
     self.non_relational_db = None
@@ -186,6 +193,7 @@ class BenchmarkSpec:
     self.smb_service = None
     self.messaging_service = None
     self.ai_model = None
+    self.pinecone = None
     self.memory_store = None
     self.data_discovery_service = None
     self.app_groups = {}
@@ -221,6 +229,8 @@ class BenchmarkSpec:
     # Used by redis_memtier and keydb_memtier
     self.redis_endpoint_ip: str
     self.keydb_endpoint_ip: str
+    # Used by mongodb_ycsb
+    self.mongodb_url: str
     # Used by dino_benchmark
     self.imagenet_dir: str
     # Used by mlperf_inference_cpu_benchmark
@@ -305,6 +315,7 @@ class BenchmarkSpec:
     self.ConstructDataDiscoveryService()
     self.ConstructBaseJob()
     self.ConstructMemoryStore()
+    self.ConstructPinecone()
 
   def ConstructContainerCluster(self):
     """Create the container cluster."""
@@ -372,6 +383,7 @@ class BenchmarkSpec:
 
       master_group_spec = copy.copy(base_vm_spec)
       master_group_spec.vm_count = 1
+      master_group_spec.disk_spec = None
       self.vms_to_boot['master_group'] = master_group_spec
     self.resources.append(self.dpb_service)
 
@@ -393,6 +405,7 @@ class BenchmarkSpec:
           relational_db_class.GetDefaultEngineVersion(engine)
       )
     self.relational_db = relational_db_class(self.config.relational_db)
+    self.resources.append(self.relational_db)
 
   def ConstructNonRelationalDb(self) -> None:
     """Initializes the non_relational db."""
@@ -468,7 +481,9 @@ class BenchmarkSpec:
         edw_service_class_name[0].upper() + edw_service_class_name[1:],
     )
     # Check if a new instance needs to be created or restored from snapshot
-    self.edw_service = edw_service_class(self.config.edw_service)  # pytype: disable=not-instantiable
+    self.edw_service = edw_service_class(
+        self.config.edw_service
+    )  # pytype: disable=not-instantiable
 
   def ConstructEdwComputeResource(self):
     """Create an edw_compute_resource object."""
@@ -495,7 +510,9 @@ class BenchmarkSpec:
     example_resource_class = example_resource.GetExampleResourceClass(
         example_resource_type
     )
-    self.example_resource = example_resource_class(self.config.example_resource)  # pytype: disable=not-instantiable
+    self.example_resource = example_resource_class(
+        self.config.example_resource
+    )  # pytype: disable=not-instantiable
     self.resources.append(self.example_resource)
 
   def ConstructBaseJob(self):
@@ -507,7 +524,9 @@ class BenchmarkSpec:
     providers.LoadProvider(cloud)
     job_class = base_job.GetJobClass(job_type)
 
-    self.base_job = job_class(self.config.base_job, self.container_registry)  # pytype: disable=not-instantiable
+    self.base_job = job_class(
+        self.config.base_job, self.container_registry
+    )  # pytype: disable=not-instantiable
     self.resources.append(self.base_job)
 
   def ConstructManagedAiModel(self):
@@ -517,8 +536,27 @@ class BenchmarkSpec:
     cloud = self.config.ai_model.cloud
     providers.LoadProvider(cloud)
     model_class = managed_ai_model.GetManagedAiModelClass(cloud)
-    self.ai_model = model_class(self.config.ai_model)  # pytype: disable=not-instantiable
+    assert self.vm_groups
+    vm = self.vm_groups[
+        'clients' if 'clients' in self.vm_groups else 'default'
+    ][0]
+    self.ai_model = model_class(
+        vm, self.config.ai_model
+    )  # pytype: disable=not-instantiable
     self.resources.append(self.ai_model)
+
+  def ConstructPinecone(self):
+    """Create an example_resource object. Also call this from pkb.py."""
+    if self.config.pinecone is None:
+      return
+    cloud = self.config.pinecone.cloud
+    providers.LoadProvider(cloud)
+    model_class = pinecone_resource.GetPineconeResourceClass(cloud)
+    self.pinecone = model_class(
+        self.config.pinecone
+    )  # pytype: disable=not-instantiable
+    self.pinecone.SetVms(self.vm_groups)
+    self.resources.append(self.pinecone)
 
   def ConstructMemoryStore(self):
     """Create the memory store instance."""
@@ -533,7 +571,9 @@ class BenchmarkSpec:
             self.config.memory_store.memory_store_type,
         )
     )
-    self.memory_store = managed_memory_store_class(self.config.memory_store)  # pytype: disable=not-instantiable
+    self.memory_store = managed_memory_store_class(
+        self.config.memory_store
+    )  # pytype: disable=not-instantiable
     self.memory_store.SetVms(self.vm_groups)
     self.resources.append(self.memory_store)
 
@@ -558,7 +598,9 @@ class BenchmarkSpec:
         cloud = group_spec.cloud
         providers.LoadProvider(cloud)
         nfs_class = nfs_service.GetNfsServiceClass(cloud)
-        self.nfs_service = nfs_class(disk_spec, group_spec.vm_spec.zone)  # pytype: disable=not-instantiable
+        self.nfs_service = nfs_class(
+            disk_spec, group_spec.vm_spec.zone
+        )  # pytype: disable=not-instantiable
       else:
         self.nfs_service = nfs_service.UnmanagedNfsService(
             disk_spec, self.vms[0]
@@ -584,7 +626,9 @@ class BenchmarkSpec:
       cloud = group_spec.cloud
       providers.LoadProvider(cloud)
       smb_class = smb_service.GetSmbServiceClass(cloud)
-      self.smb_service = smb_class(disk_spec, group_spec.vm_spec.zone)  # pytype: disable=not-instantiable
+      self.smb_service = smb_class(
+          disk_spec, group_spec.vm_spec.zone
+      )  # pytype: disable=not-instantiable
       logging.debug('SMB service %s', self.smb_service)
       break
 
@@ -639,6 +683,8 @@ class BenchmarkSpec:
       vm = self._CreateVirtualMachine(group_spec.vm_spec, os_type, cloud)
       vm.vm_group = group_name
       if disk_spec and not vm.is_static:
+        if _ENFORCE_DISK_MOUNT_POINT_OVERRIDE.value:
+          disk_spec.mount_point = FLAGS.scratch_dir
         vm.SetDiskSpec(disk_spec, group_spec.disk_count)
       vms.append(vm)
 
@@ -652,7 +698,9 @@ class BenchmarkSpec:
       cloud = vm_group[0].CLOUD
       providers.LoadProvider(cloud)
       capacity_reservation_class = capacity_reservation.GetResourceClass(cloud)
-      self.capacity_reservations.append(capacity_reservation_class(vm_group))  # pytype: disable=not-instantiable
+      self.capacity_reservations.append(
+          capacity_reservation_class(vm_group)  # pytype: disable=not-instantiable
+      )
 
   def _CheckBenchmarkSupport(self, cloud):
     """Throw an exception if the benchmark isn't supported."""
@@ -878,6 +926,8 @@ class BenchmarkSpec:
       background_tasks.RunThreaded(lambda tpu: tpu.Create(), self.tpus)
     if self.ai_model:
       self.ai_model.Create()
+    if self.pinecone:
+      self.pinecone.Create()
     if self.edw_service:
       if (
           not self.edw_service.user_managed
@@ -947,6 +997,8 @@ class BenchmarkSpec:
       self.ai_model.Delete()
     if hasattr(self, 'data_discovery_service') and self.data_discovery_service:
       self.data_discovery_service.Delete()
+    if hasattr(self, 'pinecone') and self.pinecone:
+      self.pinecone.Delete()
 
     # Note: It is ok to delete capacity reservations before deleting the VMs,
     # and will actually save money (mere seconds of usage).
@@ -963,7 +1015,11 @@ class BenchmarkSpec:
 
     if self.vms:
       try:
+        # Delete VMs first to detach any multi-attached disks.
         background_tasks.RunThreaded(self.DeleteVm, self.vms)
+        background_tasks.RunThreaded(
+            lambda vm: vm.DeleteScratchDisks(), self.vms
+        )
       except Exception:
         logging.exception(
             'Got an exception deleting VMs. '
@@ -1079,7 +1135,9 @@ class BenchmarkSpec:
 
     placement_group_class = placement_group.GetPlacementGroupClass(cloud)
     if placement_group_class:
-      return placement_group_class(placement_group_spec)  # pytype: disable=not-instantiable
+      return placement_group_class(
+          placement_group_spec
+      )  # pytype: disable=not-instantiable
     else:
       return None
 
@@ -1118,7 +1176,6 @@ class BenchmarkSpec:
     if vm.is_static and vm.install_packages:
       vm.PackageCleanup()
     vm.Delete()
-    vm.DeleteScratchDisks()
 
   @staticmethod
   def _GetPickleFilename(uid):

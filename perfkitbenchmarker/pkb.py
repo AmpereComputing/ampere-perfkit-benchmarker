@@ -325,6 +325,7 @@ def ShouldTeardown(
     samples: MutableSequence[Mapping[str, Any]],
     vms: Sequence[virtual_machine.BaseVirtualMachine] | None = None,
     skip_teardown_zonal_vm_limit: int | None = None,
+    skip_teardown_on_command_timeout: bool = False,
 ) -> bool:
   """Checks all samples against all skip teardown conditions.
 
@@ -335,13 +336,25 @@ def ShouldTeardown(
     vms: list of VMs brought up by the benchmark
     skip_teardown_zonal_vm_limit: the maximum number of VMs in the zone that can
       be left behind.
+    skip_teardown_on_command_timeout: a boolean indicating whether to skip
+      teardown if the failure substatus is COMMAND_TIMEOUT
 
   Returns:
     True if the benchmark should teardown as usual, False if it should skip due
     to a condition being met.
   """
-  if not skip_teardown_conditions:
+  if not skip_teardown_conditions and not skip_teardown_on_command_timeout:
     return True
+  if skip_teardown_on_command_timeout:
+    for status_sample in samples:
+      if (
+          status_sample['metadata'].get('failed_substatus')
+          == benchmark_status.FailedSubstatus.COMMAND_TIMEOUT
+      ):
+        logging.warning(
+            'Skipping TEARDOWN phase due to COMMAND_TIMEOUT substatus.'
+        )
+        return False
   if skip_teardown_zonal_vm_limit:
     for vm in vms:
       num_lingering_vms = vm.GetNumTeardownSkippedVms()
@@ -625,7 +638,9 @@ def _SetFreezePath(spec: bm_spec.BenchmarkSpec) -> None:
     logging.info('Using freeze path, %s', spec.freeze_path)
 
 
-def DoProvisionPhase(spec, timer):
+def DoProvisionPhase(
+    spec: bm_spec.BenchmarkSpec, timer: timing_util.IntervalTimer
+):
   """Performs the Provision phase of benchmark execution.
 
   Args:
@@ -709,7 +724,9 @@ class InterruptChecker:
       raise errors.Benchmarks.InsufficientCapacityCloudFailure('Interrupt')
 
 
-def DoPreparePhase(spec, timer):
+def DoPreparePhase(
+    spec: bm_spec.BenchmarkSpec, timer: timing_util.IntervalTimer
+):
   """Performs the Prepare phase of benchmark execution.
 
   Args:
@@ -733,7 +750,11 @@ def DoPreparePhase(spec, timer):
   events.after_phase.send(stages.PREPARE, benchmark_spec=spec)
 
 
-def DoRunPhase(spec, collector, timer):
+def DoRunPhase(
+    spec: bm_spec.BenchmarkSpec,
+    collector: publisher.SampleCollector,
+    timer: timing_util.IntervalTimer,
+):
   """Performs the Run phase of benchmark execution.
 
   Args:
@@ -792,6 +813,8 @@ def DoRunPhase(spec, collector, timer):
 
     if FLAGS.record_lscpu:
       samples.extend(linux_virtual_machine.CreateLscpuSamples(spec.vms))
+    if FLAGS.record_ulimit:
+      samples.extend(linux_virtual_machine.CreateUlimitSamples(spec.vms))
 
     if pkb_flags.RECORD_PROCCPU.value:
       samples.extend(linux_virtual_machine.CreateProcCpuSamples(spec.vms))
@@ -818,6 +841,15 @@ def DoRunPhase(spec, collector, timer):
     ):
       collector.PublishSamples()
       last_publish_time = time.time()
+
+    if pkb_flags.BETWEEN_RUNS_SLEEP_TIME.value > 0:
+      logging.info(
+          'Sleeping for %s seconds after run %d.',
+          FLAGS.between_runs_sleep_time,
+          run_number,
+      )
+      time.sleep(FLAGS.between_runs_sleep_time)
+
     run_number += 1
     if _IsRunStageFinished():
       if FLAGS.after_run_sleep_time:
@@ -829,7 +861,9 @@ def DoRunPhase(spec, collector, timer):
       break
 
 
-def DoCleanupPhase(spec, timer):
+def DoCleanupPhase(
+    spec: bm_spec.BenchmarkSpec, timer: timing_util.IntervalTimer
+):
   """Performs the Cleanup phase of benchmark execution.
 
   Cleanup phase work should be delegated to spec.BenchmarkCleanup to allow
@@ -855,7 +889,11 @@ def DoCleanupPhase(spec, timer):
   events.after_phase.send(stages.CLEANUP, benchmark_spec=spec)
 
 
-def DoTeardownPhase(spec, collector, timer):
+def DoTeardownPhase(
+    spec: bm_spec.BenchmarkSpec,
+    collector: publisher.SampleCollector,
+    timer: timing_util.IntervalTimer,
+):
   """Performs the Teardown phase of benchmark execution.
 
   Teardown phase work should be delegated to spec.Delete to allow non-PKB based
@@ -926,8 +964,14 @@ def _PublishRunStartedSample(spec):
   """
   metadata = {'flags': str(flag_util.GetProvidedCommandLineFlags())}
   # Publish the path to this spec's PKB logs at the start of the runs.
-  if log_util.log_cloud_path:
-    metadata['pkb_log_path'] = log_util.log_cloud_path
+  if log_util.PKB_LOG_BUCKET.value and FLAGS.run_uri:
+    metadata['pkb_log_path'] = log_util.GetLogCloudPath(
+        log_util.PKB_LOG_BUCKET.value, f'{FLAGS.run_uri}-pkb.log'
+    )
+  if log_util.VM_LOG_BUCKET.value and FLAGS.run_uri:
+    metadata['vm_log_path'] = log_util.GetLogCloudPath(
+        log_util.VM_LOG_BUCKET.value, FLAGS.run_uri
+    )
 
   _PublishEventSample(spec, 'Run Started', metadata)
 
@@ -984,7 +1028,9 @@ def _IsException(e: Exception, exception_class: Type[Exception]) -> bool:
   return False
 
 
-def RunBenchmark(spec, collector):
+def RunBenchmark(
+    spec: bm_spec.BenchmarkSpec, collector: publisher.SampleCollector
+):
   """Runs a single benchmark and adds the results to the collector.
 
   Args:
@@ -1048,6 +1094,7 @@ def RunBenchmark(spec, collector):
             interrupt_checker = None
 
           if stages.TEARDOWN in FLAGS.run_stage:
+            CaptureVMLogs(spec.vms)
             skip_teardown_conditions = ParseSkipTeardownConditions(
                 pkb_flags.SKIP_TEARDOWN_CONDITIONS.value
             )
@@ -1056,6 +1103,7 @@ def RunBenchmark(spec, collector):
                 collector.published_samples + collector.samples,
                 spec.vms,
                 pkb_flags.SKIP_TEARDOWN_ZONAL_VM_LIMIT.value,
+                pkb_flags.SKIP_TEARDOWN_ON_COMMAND_TIMEOUT.value,
             )
             if should_teardown:
               current_run_stage = stages.TEARDOWN
@@ -1119,6 +1167,10 @@ def RunBenchmark(spec, collector):
           spec.failed_substatus = (
               benchmark_status.FailedSubstatus.RETRIES_EXCEEDED
           )
+        elif _IsException(e, errors.Config.InvalidValue):
+          spec.failed_substatus = benchmark_status.FailedSubstatus.INVALID_VALUE
+        elif _IsException(e, vm_util.ImageNotFoundError):
+          spec.failed_substatus = benchmark_status.FailedSubstatus.UNSUPPORTED
         else:
           spec.failed_substatus = benchmark_status.FailedSubstatus.UNCATEGORIZED
         spec.status_detail = str(e)
@@ -1626,7 +1678,7 @@ def RunBenchmarks():
     _WriteCompletionStatusFile(benchmark_specs, status_file)
 
   # Upload PKB logs to GCS after all benchmark runs are complete.
-  log_util.CollectPKBLogs()
+  log_util.CollectPKBLogs(run_uri=FLAGS.run_uri)
   all_benchmarks_succeeded = all(
       spec.status == benchmark_status.SUCCEEDED for spec in benchmark_specs
   )
@@ -1796,11 +1848,22 @@ def _CollectMeminfoHandler(
   samples.extend(background_tasks.RunThreaded(CollectMeminfo, linux_vms))
 
 
-def Main():
-  """Entrypoint for PerfKitBenchmarker."""
-  assert sys.version_info >= (3, 11), 'PerfKitBenchmarker requires Python 3.11+'
-  log_util.ConfigureBasicLogging()
-  _InjectBenchmarkInfoIntoDocumentation()
+def CaptureVMLogs(
+    vms: List[virtual_machine.BaseVirtualMachine],
+) -> None:
+  """Generates and captures VM logs."""
+  if pkb_flags.CAPTURE_VM_LOGS.value:
+    for vm in vms:
+      vm_log_files = vm.GenerateAndCaptureLogs()
+      logging.info(
+          'Captured the following logs for VM %s: %s', vm.name, vm_log_files
+      )
+      for log_path in vm_log_files:
+        log_util.CollectVMLogs(FLAGS.run_uri, log_path)
+
+
+def ParseArgs():
+  """Parse command line arguments ."""
   argv = flag_alias.AliasFlagsFromArgs(sys.argv)
   _ParseFlags(argv)
   if FLAGS.helpmatch:
@@ -1818,4 +1881,12 @@ def Main():
 
   CheckVersionFlag()
   SetUpPKB()
+
+
+def Main():
+  """Entrypoint for PerfKitBenchmarker."""
+  assert sys.version_info >= (3, 11), 'PerfKitBenchmarker requires Python 3.11+'
+  log_util.ConfigureBasicLogging()
+  _InjectBenchmarkInfoIntoDocumentation()
+  ParseArgs()
   return RunBenchmarks()

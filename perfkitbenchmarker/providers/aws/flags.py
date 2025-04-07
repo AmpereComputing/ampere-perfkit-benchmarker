@@ -33,6 +33,12 @@ flags.DEFINE_integer(
     None,
     'Provisioned throughput (MB/s) for (SSD) volumes in AWS.',
 )
+AWS_NIC_QUEUE_COUNTS = flags.DEFINE_list(
+    'aws_nic_queue_counts',
+    None,
+    'The queue count of each NIC. Specify a list of key=value pairs, where key'
+    ' is the network device name and value is the queue count.',
+)
 
 flags.DEFINE_string(
     'aws_dax_node_type',
@@ -104,7 +110,7 @@ ELASTICACHE_NODE_TYPE = flags.DEFINE_string(
     'cache.m4.large',
     'The AWS cache node type to use for elasticache clusters.',
 )
-flags.DEFINE_string(
+ELASTICACHE_FAILOVER_ZONE = flags.DEFINE_string(
     'elasticache_failover_zone', None, 'AWS elasticache failover zone'
 )
 flags.DEFINE_string(
@@ -253,3 +259,13 @@ def _ValidatePreprovisionedDataAccess(flag_values: dict[str, Any]) -> bool:
       or flag_values[AWS_EC2_INSTANCE_PROFILE.name]
       or flag_values[AWS_EKS_POD_IDENTITY_ROLE.name]
   )
+
+# MemoryDB Flags
+MEMORYDB_NODE_TYPE = flags.DEFINE_string(
+    'aws_memorydb_node_type',
+    'db.r7g.large',
+    'The AWS node type to use for MemoryDB clusters.',
+)
+MEMORYDB_FAILOVER_ZONE = flags.DEFINE_string(
+    'aws_memorydb_failover_zone', None, 'AWS MemoryDB failover zone'
+)

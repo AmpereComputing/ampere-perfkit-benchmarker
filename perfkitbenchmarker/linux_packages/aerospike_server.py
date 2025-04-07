@@ -16,6 +16,7 @@
 """Module containing aerospike server installation and cleanup functions."""
 
 import enum
+import hashlib
 import logging
 
 from absl import flags
@@ -230,14 +231,8 @@ def _WaitForServerUp(server, idx=None):
       is an error connecting to the telnet port or otherwise running the remote
       check command.
   """
-  address = server.internal_ip
-  port = f'{idx + 3}000'
-  logging.info('Trying to connect to Aerospike at %s:%s', server, port)
   try:
-    out, _ = server.RemoteCommand(
-        f'sudo asinfo -v "status" -p {port} -h {address}', ignore_failure=True
-    )
-    if out.startswith('ok'):
+    if IsServerUp(server, idx):
       logging.info('Aerospike server status is OK. Server up and running.')
       return
   except errors.VirtualMachine.RemoteCommandError as e:
@@ -246,10 +241,31 @@ def _WaitForServerUp(server, idx=None):
     )
   else:
     raise errors.Resource.RetryableCreationError(
-        "Aerospike server not up yet. Expected 'ok' but got '%s'." % out
+        'Aerospike server not up yet (see log for details).'
     )
   finally:
     server.RemoteCommand('sudo systemctl status aerospike')
+
+
+def IsServerUp(server, idx=None):
+  """Check if the Aerospike server is up and responsive.
+
+  Args:
+    server: VirtualMachine Aerospike has been installed on.
+    idx: aerospike process index.
+
+  Returns:
+    A bool indicating whether the server is up.
+  """
+  idx = idx or 0
+  address = server.internal_ip
+  port = f'{idx + 3}000'
+  logging.info('Trying to connect to Aerospike at %s:%s', server, port)
+
+  out, _ = server.RemoteCommand(
+      f'sudo asinfo -v "status" -p {port} -h {address}', ignore_failure=True
+  )
+  return out.startswith('ok')
 
 
 def WipeDisk(server, devices):
@@ -385,8 +401,7 @@ def Uninstall(vm):
 
 
 def GetNodeId(vm):
-  # Assuming the instance name always follows the patten `pkb-xxxx-x`.
-  return vm.name.split('-')[2]
+  return int(hashlib.sha1(vm.name.encode('utf-8')).hexdigest(), 16) % (10 ** 5)
 
 
 def EnableStrongConsistency(vm, namespaces):

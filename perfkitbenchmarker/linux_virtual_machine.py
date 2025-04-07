@@ -85,6 +85,7 @@ _DEFAULT_DISK_FSTAB_OPTIONS = 'defaults'
 
 # regex for parsing lscpu and /proc/cpuinfo
 _COLON_SEPARATED_RE = re.compile(r'^\s*(?P<key>.*?)\s*:\s*(?P<value>.*?)\s*$')
+_BRACKET_SEPARATED_RE = re.compile(r'^\s*(?P<key>.*\))\s*(?P<value>.*?)\s*$')
 
 _SYSFS_CPU_PATH = '/sys/devices/system/cpu'
 
@@ -468,6 +469,7 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
 
   def _CreateVmTmpDir(self):
     self.RemoteCommand('mkdir -p %s' % vm_util.VM_TMP_DIR)
+    self.RemoteCommand('sudo chmod 755 %s' % vm_util.VM_TMP_DIR)
 
   def _SetTransparentHugepages(self):
     """Sets transparent hugepages based on --enable_transparent_hugepages.
@@ -978,6 +980,16 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
       guest_arch = f'{implementer}_{arch}_{variant}_{part}'
     return guest_arch
 
+  def CheckUlimit(self) -> 'UlimitResults':
+    """Returns a UlimitResults from the host VM.
+
+    Do not cache these results, because many benchmarks change them.
+    The value can be different before and after runs.
+    """
+    ulimit, _ = self.RemoteCommand('ulimit -a')
+    self._ulimit_cache = UlimitResults(ulimit)
+    return self._ulimit_cache
+
   def CheckLsCpu(self):
     """Returns a LsCpuResults from the host VM."""
     if not self._lscpu_cache:
@@ -1230,6 +1242,19 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
     """
     pass
 
+  def IsMounted(self, mount_point: str, dev_path: str):
+    """Returns whether the given mount point is mounted."""
+    # GCP disk uses a symlink for the device path, so we need to translate it
+    # to the actual device path. For other cloud providers, the device path
+    # should already be the actual device path and readlink will return the
+    # same path in the result.
+    stdout, _ = self.RemoteHostCommand(f'readlink -f {dev_path}')
+    device_path = stdout.strip()
+    stdout, _ = self.RemoteHostCommand(
+        f'mount | grep "{device_path} on {mount_point}" | wc -l'
+    )
+    return stdout and int(stdout) > 0
+
   @vm_util.Retry()
   def FormatDisk(self, device_path, disk_type=None):
     """Formats a disk attached to the VM."""
@@ -1243,9 +1268,7 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
     # TODO(user): Allow custom disk formatting options.
     if FLAGS.disk_fs_type == 'xfs':
       block_size = FLAGS.disk_block_size or 512
-      fmt_cmd = 'sudo mkfs.xfs -f -i size={} {}'.format(
-          block_size, device_path
-      )
+      fmt_cmd = 'sudo mkfs.xfs -f -i size={} {}'.format(block_size, device_path)
     else:
       block_size = FLAGS.disk_block_size or 4096
       fmt_cmd = (
@@ -1361,6 +1384,56 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
           % (retcode, full_cmd, stdout, stderr)
       )
       raise errors.VirtualMachine.RemoteCommandError(error_text)
+
+  def RunCommand(
+      self,
+      command: str | list[str],
+      ignore_failure: bool = False,
+      should_pre_log: bool = True,
+      stack_level: int = 1,
+      timeout: float | None = None,
+      **kwargs: Any,
+  ) -> tuple[str, str, int]:
+    """Runs a command.
+
+    Additional args can be supplied & are passed to lower level functions but
+    aren't required.
+
+    Args:
+      command: A valid bash command in string or list form.
+      ignore_failure: Ignore any failure if set to true.
+      should_pre_log: Whether to print the command being run or not.
+      stack_level: Number of stack frames to skip & get an "interesting" caller,
+        for logging. 1 skips this function, 2 skips this & its caller, etc..
+      timeout: The time to wait in seconds for the command before exiting. None
+        means no timeout.
+      **kwargs: Additional command arguments.
+
+    Returns:
+      A tuple of stdout and stderr from running the command.
+
+    Raises:
+      RemoteCommandError: If there was a problem issuing the command.
+    """
+    if not isinstance(command, str):
+      cmd_str = ' '.join(command)
+    else:
+      cmd_str = command
+    stack_level += 1
+    if 'raise_on_failure' in kwargs:
+      ignore_failure = not kwargs.pop('raise_on_failure')
+    if 'env' in kwargs:
+      env_vars = kwargs.pop('env')
+      for var_name, var_value in env_vars.items():
+        cmd_str = f'export {var_name}={var_value} && {cmd_str}'
+    return self.RemoteCommandWithReturnCode(
+        cmd_str,
+        ignore_failure=ignore_failure,
+        should_pre_log=should_pre_log,
+        stack_level=stack_level,
+        timeout=timeout,
+        **kwargs,
+    )
 
   def RemoteCommand(self, *args, **kwargs) -> Tuple[str, str]:
     """Runs a command on the VM.
@@ -1850,6 +1923,24 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
           f'sudo nvme --set-feature --feature-id=8 --value=0x101 {path}'
       )
 
+  def hasStripedDiskDevice(self, dev_name: str) -> bool:
+    """Checks if the striped disk device exists or not.
+
+    Args:
+      dev_name: The name of the device.
+
+    Returns:
+      True if the striped disk device exists.
+    """
+    # Suppress the error as it's not a blocker to the test if the command fails.
+    # The command would pass if the stripped device exists so the exit code of
+    # the command would be 0.
+    _, _, return_code = self.RemoteHostCommandWithReturnCode(
+        f'sudo mdadm "{dev_name}"', ignore_failure=True
+    )
+    # Return True if the command succeeds, otherwise False.
+    return return_code == 0
+
   def StripeDisks(self, devices, striped_device):
     """Raids disks together using mdadm.
 
@@ -1881,6 +1972,22 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
         ",discard 0 0' | sudo tee -a /etc/fstab"
     )
     self.RemoteHostCommand(cmd)
+
+  def IsDiskFormatted(self, dev_name, num_partitions):
+    """Checks if the disk is formatted.
+
+    Args:
+      dev_name: The name of the device.
+      num_partitions: The number of new partitions to create.
+
+    Returns:
+      True if the disk is already formatted with given number of partitions.
+    """
+    # Check how many partition are already created for the given disk.
+    ret, _ = self.RemoteHostCommand(
+        f'ls /dev/disk/by-id/ | grep "{dev_name}-part" | wc -l'
+    )
+    return ret and int(ret) == num_partitions
 
   def PartitionDisk(self, dev_name, dev_path, num_partitions, partition_size):
     """Partitions the disk into smaller pieces.
@@ -2060,7 +2167,13 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
     self.InstallPackages('nvme-cli')
     version_str, _ = self.RemoteCommand('sudo nvme --version')
     version_num = version_str.split()[2]
-    if packaging_version.parse(version_num) >= packaging_version.parse('1.5'):
+    # TODO(arushigaur): Version check can be removed and we can just parse
+    # the raw output.
+    if packaging_version.parse(version_num) >= packaging_version.parse(
+        '1.5'
+    ) and packaging_version.parse(version_num) < packaging_version.parse(
+        '2.11'
+    ):
       stdout, _ = self.RemoteCommand('sudo nvme list --output-format json')
       if not stdout:
         return []
@@ -2088,6 +2201,67 @@ class BaseLinuxMixin(os_mixin.BaseOsMixin):
         device['ModelNumber'] = device_info[2].strip()
         response.append(device)
       return response
+
+  def GenerateAndCaptureLogs(self) -> list[str]:
+    """Generates and/or captures logs for this VM and returns the paths.
+
+    Currently supports syslog and journalctl, and/or sos reports depending on
+    what the VM supports.
+
+    Returns:
+      A list of paths where the logs are stored on the caller's machine.
+
+    """
+    log_files = []
+    # syslog
+    try:
+      syslog_path = vm_util.PrependTempDir('syslog')
+      self.RemoteCopy(syslog_path, '/var/log/syslog', copy_to=False)
+      log_files.append(syslog_path)
+    except errors.VirtualMachine.RemoteCommandError:
+      logging.warning('Failed to capture VM syslog on %s', self.name)
+    # journalctl
+    try:
+      journalctl_path = vm_util.PrependTempDir('journalctl')
+      self.RemoteCommand('sudo journalctl --no-pager > /tmp/journalctl.tmp')
+      self.PullFile(journalctl_path, '/tmp/journalctl.tmp')
+      log_files.append(journalctl_path)
+    except errors.VirtualMachine.RemoteCommandError:
+      logging.warning('Failed to capture VM journalctl on %s', self.name)
+    # sos report
+    sosreport_local_path = vm_util.PrependTempDir('sosreport.tar.xz')
+    if self.GenerateAndCaptureSosReport(sosreport_local_path):
+      log_files.append(sosreport_local_path)
+    return log_files
+
+  def GenerateAndCaptureSosReport(self, local_path: str) -> bool:
+    """Generates an sos report for the remote VM and captures it.
+
+    Following the instructions at:
+      https://cloud.google.com/container-optimized-os/docs/how-to/sosreport
+
+    Args:
+      local_path: The path to store the sos report on the caller's machine.
+
+    Returns:
+      True if the sos report was successfully generated and captured;
+      False otherwise.
+    """
+    try:
+      self.RemoteCommandWithReturnCode(
+          'sudo sos report --all-logs --batch --tmp-dir=/tmp'
+      )
+    except errors.VirtualMachine.RemoteCommandError:
+      logging.warning('Failed to generate sos report on %s', self.name)
+      return False
+    sosreport_path = '/tmp/sosreport-*.tar.xz'
+    # The report is owned by root and is not readable by other users, so we
+    # need to change the permissions to copy it.
+    self.RemoteCommand(
+        f'sudo chmod o+r {sosreport_path}'
+    )
+    self.RemoteCopy(local_path, sosreport_path, copy_to=False)
+    return True
 
 
 def _IncrementStackLevel(**kwargs: Any) -> Any:
@@ -2834,6 +3008,26 @@ class Ubuntu2004DLMixin(Ubuntu2004Mixin):
     pass
 
 
+class Debian12DLMixin(Debian12Mixin):
+  """Class holding DeepLearning specific VM methods and attributes."""
+
+  OS_TYPE = os_types.DEBIAN12_DL
+
+  def OnStartup(self):
+    super().OnStartup()
+    self.RemoteCommand('sudo chmod -R 755 /var/lib/nvidia')
+    self.RemoteCommand('sudo chown $USER:$USER /var/lib/nvidia')
+    self.RemoteCommand('mkdir -p /var/lib/nvidia/lib64')
+
+  def UpdateDockerfile(self, unused_dockerfile):
+    """Add provider specific instructions to a docker file.
+
+    Args:
+      unused_dockerfile: Path to dockerfile on remote VMs.
+    """
+    pass
+
+
 class AmazonLinux2DLMixin(AmazonLinux2Mixin):
   """Class holding DLAMI specific VM methods and attributes."""
 
@@ -3015,13 +3209,14 @@ class ContainerizedDebianMixin(BaseDebianMixin):
       self.RemoteHostCommand('docker stop %s' % self.docker_id)
 
 
-def _ParseTextProperties(text):
+def _ParseTextProperties(text, key_value_regex=_COLON_SEPARATED_RE):
   """Parses raw text that has lines in "key:value" form.
 
   When comes across an empty line will return a dict of the current values.
 
   Args:
     text: Text of lines in "key:value" form.
+    key_value_regex: Regex to use to parse key and value from each line of text.
 
   Yields:
     Dict of [key,value] values for a section.
@@ -3029,7 +3224,7 @@ def _ParseTextProperties(text):
   current_data = {}
   for line in (line.strip() for line in text.splitlines()):
     if line:
-      m = _COLON_SEPARATED_RE.match(line)
+      m = key_value_regex.match(line)
       if m:
         current_data[m.group('key')] = m.group('value')
       else:
@@ -3041,6 +3236,57 @@ def _ParseTextProperties(text):
         current_data = {}
   if current_data:
     yield current_data
+
+
+def CreateUlimitSamples(
+    vms: list['BaseLinuxVirtualMachine'],
+) -> list[sample.Sample]:
+  """Creates samples from linux VMs of ulimit output."""
+  samples = []
+  for vm in vms:
+    metadata = {'node_name': vm.name}
+    metadata.update(vm.CheckUlimit().data)
+    samples.append(sample.Sample('ulimit', 0, '', metadata))
+  return samples
+
+
+class UlimitResults():
+  """Holds the contents of the command ulimit."""
+
+  def __init__(self, ulimit: str):
+    """UlimitResults Constructor.
+
+    The ulimit command does *not* have any option for
+    json output, so keep on using the text format.
+
+    Args:
+      ulimit: A string in the format of "ulimit -a" command
+
+    Raises:
+      ValueError: if the format of ulimit isn't what was expected for parsing
+
+    Example value of ulimit is:
+    real-time non-blocking time  (microseconds, -R) unlimited
+    core file size              (blocks, -c) 0
+    data seg size               (kbytes, -d) unlimited
+    scheduling priority                 (-e) 0
+    file size                   (blocks, -f) unlimited
+    pending signals                     (-i) 772515
+    max locked memory           (kbytes, -l) unlimited
+    max memory size             (kbytes, -m) unlimited
+    open files                          (-n) 131072
+    pipe size                (512 bytes, -p) 8
+    POSIX message queues         (bytes, -q) 819200
+    real-time priority                  (-r) 0
+    stack size                  (kbytes, -s) 8192
+    cpu time                   (seconds, -t) unlimited
+    max user processes                  (-u) 131072
+    virtual memory              (kbytes, -v) unlimited
+    file locks                          (-x) unlimited
+    """
+    self.data = {}
+    for stanza in _ParseTextProperties(ulimit, _BRACKET_SEPARATED_RE):
+      self.data.update(stanza)
 
 
 def CreateLscpuSamples(vms):

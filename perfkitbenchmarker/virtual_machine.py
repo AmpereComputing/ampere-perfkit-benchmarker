@@ -148,6 +148,28 @@ _VM_INSTANCE_NAME_SUFFIX = flags.DEFINE_string(
         ' pkb-{run_uri}-{instance_number}-{vm_instance_name_suffix}'
     ),
 )
+_VM_INSTANCE_NAME_SUFFIXES = flags.DEFINE_list(
+    'vm_instance_name_suffixes',
+    None,
+    (
+        'Optional, the list of suffixes to add after the VM instance name.'
+        ' Without this, instance is named as pkb-{run_uri}-{instance_number}.'
+        ' With this option, the instance name will be'
+        ' pkb-{run_uri}-{vm_instance_name_suffixes[instance_number]}.'
+        ' The number of suffixes must be equal to the total number of VMs'
+        ' (servers and clients).'
+    ),
+)
+_VM_NAME_PREFIX = flags.DEFINE_string(
+    'vm_name_prefix',
+    None,
+    (
+        'Optional, a prefix to add after the VM instance name. Without this,'
+        ' instance is named as pkb-{run_uri}-{instance_number}. With this'
+        ' option, the instance name will be'
+        ' {prefix}-{instance_number}-{vm_instance_name_suffix}'
+    ),
+)
 _REQUIRED_CPU_VERSION = flags.DEFINE_string(
     'required_cpu_version',
     None,
@@ -163,6 +185,12 @@ _REQUIRED_CPU_VERSION_RETRIES = flags.DEFINE_integer(
     'required_cpu_version_retries',
     5,
     'The number of times to retry if the required CPU version does not match.',
+)
+_VM_USER_NAME = flags.DEFINE_string(
+    'vm_user_name',
+    DEFAULT_USERNAME,
+    'The user name to use for the VM. If not specified, the default user name'
+    ' "perfkit" is used.',
 )
 
 
@@ -533,14 +561,24 @@ class BaseVirtualMachine(os_mixin.BaseOsMixin, resource.BaseResource):
     super().__init__()
     with self._instance_counter_lock:
       self.instance_number = self._instance_counter
+      name_prefix = (
+          _VM_NAME_PREFIX.value
+          if _VM_NAME_PREFIX.value
+          else f'pkb-{FLAGS.run_uri}'
+      )
       if _VM_INSTANCE_NAME_SUFFIX.value:
-        self.name = 'pkb-%s-%d-%s' % (
-            FLAGS.run_uri,
+        self.name = '%s-%d-%s' % (
+            name_prefix,
             self.instance_number,
             _VM_INSTANCE_NAME_SUFFIX.value,
         )
+      elif _VM_INSTANCE_NAME_SUFFIXES.value:
+        self.name = '%s-%s' % (
+            name_prefix,
+            _VM_INSTANCE_NAME_SUFFIXES.value[self.instance_number],
+        )
       else:
-        self.name = 'pkb-%s-%d' % (FLAGS.run_uri, self.instance_number)
+        self.name = '%s-%d' % (name_prefix, self.instance_number)
       BaseVirtualMachine._instance_counter += 1
     self.disable_interrupt_moderation = vm_spec.disable_interrupt_moderation
     self.disable_rss = vm_spec.disable_rss
@@ -559,7 +597,7 @@ class BaseVirtualMachine(os_mixin.BaseOsMixin, resource.BaseResource):
     self.ip_address = None
     self.internal_ip = None
     self.internal_ips = []
-    self.user_name = DEFAULT_USERNAME
+    self.user_name = _VM_USER_NAME.value
     self.ssh_public_key = vm_util.GetPublicKeyPath()
     self.ssh_private_key = vm_util.GetPrivateKeyPath()
     self.disk_specs = []
@@ -567,6 +605,7 @@ class BaseVirtualMachine(os_mixin.BaseOsMixin, resource.BaseResource):
     self.max_local_disks = 0
     self.local_disk_counter = 0
     self.remote_disk_counter = 0
+    self.host = None
     self.background_cpu_threads = vm_spec.background_cpu_threads
     self.background_network_mbits_per_sec = (
         vm_spec.background_network_mbits_per_sec

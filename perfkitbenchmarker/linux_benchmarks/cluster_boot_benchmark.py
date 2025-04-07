@@ -74,6 +74,7 @@ from absl import flags
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import linux_virtual_machine
+from perfkitbenchmarker import log_util
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
@@ -121,13 +122,13 @@ cluster_boot:
     always_call_cleanup: True
 """
 
-flags.DEFINE_boolean(
+_BOOT_TIME_REBOOT = flags.DEFINE_boolean(
     'cluster_boot_time_reboot',
     False,
     'Whether to reboot the VMs during the cluster boot benchmark to measure '
     'reboot performance.',
 )
-flags.DEFINE_boolean(
+_BOOT_TEST_PORT_LISTENING = flags.DEFINE_boolean(
     'cluster_boot_test_port_listening',
     False,
     'Test the time it takes to successfully connect to the port that is used '
@@ -270,6 +271,9 @@ def GetTimeToBoot(vms):
         'num_vms': len(vms),
         'os_type': vm.OS_TYPE,
         'create_delay_sec': '%0.1f' % create_delay_sec,
+        'create_operation_name': (
+            vm.create_operation_name if vm.create_operation_name else 'N/A'
+        ),
     }
 
     # TIME TO CREATE ASYNC RETURN
@@ -321,7 +325,7 @@ def GetTimeToBoot(vms):
     samples.append(
         sample.Sample('Boot Time', boot_time_sec, 'seconds', metadata)
     )
-    if FLAGS.cluster_boot_test_port_listening:
+    if _BOOT_TEST_PORT_LISTENING.value:
       assert vm.port_listening_time
       assert vm.port_listening_time >= vm.create_start_time
       port_listening_time_sec = vm.port_listening_time - min_create_start_time
@@ -339,7 +343,7 @@ def GetTimeToBoot(vms):
 
     # TIME TO RDP LISTENING
     # TODO(pclay): refactor so Windows specifics aren't in linux_benchmarks
-    if FLAGS.cluster_boot_test_rdp_port_listening:
+    if _BOOT_TEST_PORT_LISTENING.value:
       assert vm.rdp_port_listening_time
       assert vm.rdp_port_listening_time >= vm.create_start_time
       rdp_port_listening_time_sec = (
@@ -356,6 +360,22 @@ def GetTimeToBoot(vms):
               metadata,
           )
       )
+    # Host Create Latency
+    if FLAGS.dedicated_hosts:
+      assert vm.host
+      assert vm.host.create_start_time
+      assert vm.host.create_start_time < vm.create_start_time
+      host_create_latency_sec = (
+          vm.create_start_time - vm.host.create_start_time
+      )
+      samples.append(
+          sample.Sample(
+              'Host Create Latency',
+              host_create_latency_sec,
+              'seconds',
+              metadata,
+          )
+      )
 
   # Add a total cluster boot sample as the maximum boot time.
   metadata = {
@@ -366,7 +386,7 @@ def GetTimeToBoot(vms):
   samples.append(
       sample.Sample('Cluster Boot Time', max_boot_time_sec, 'seconds', metadata)
   )
-  if FLAGS.cluster_boot_test_port_listening:
+  if _BOOT_TEST_PORT_LISTENING.value:
     samples.append(
         sample.Sample(
             'Cluster Port Listening Time',
@@ -494,6 +514,7 @@ def Run(benchmark_spec):
       samples.extend(
           linux_boot.CollectBootSamples(
               vm,
+              vm.bootable_time - vm.create_start_time,
               GetCallbackIPs(),
               datetime.datetime.fromtimestamp(
                   vm.create_start_time, pytz.timezone('UTC')
@@ -501,12 +522,17 @@ def Run(benchmark_spec):
               include_networking_samples=CollectNetworkSamples(),
           )
       )
-  if FLAGS.cluster_boot_time_reboot:
+  if _BOOT_TIME_REBOOT.value:
     samples.extend(_MeasureReboot(benchmark_spec.vms))
   return samples
 
 
 def Cleanup(benchmark_spec):
+  """Kill tcpdump process and upload and/or delete tcpdump output file.
+
+  Args:
+    benchmark_spec: The benchmark specification.
+  """
   if CollectNetworkSamples():
     pid = benchmark_spec.config.temporary['tcpdump_pid']
     logging.info('Terminating tcpdump process %s', pid)
@@ -515,8 +541,10 @@ def Cleanup(benchmark_spec):
     except ProcessLookupError:
       logging.warning('tcpdump process %s ended prematurely.', pid)
     try:
-      os.remove(benchmark_spec.config.temporary['tcpdump_output_path'])
+      tcpdump_path = benchmark_spec.config.temporary['tcpdump_output_path']
+      log_util.CollectVMLogs(FLAGS.run_uri, tcpdump_path)
+      os.remove(tcpdump_path)
     except FileNotFoundError:
-      logging.exception(
+      logging.warning(
           'tcpdump output file %s does not exist', linux_boot.TCPDUMP_OUTPUT
       )

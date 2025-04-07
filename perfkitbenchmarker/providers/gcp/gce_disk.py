@@ -19,7 +19,6 @@ Use 'gcloud compute disk-types list' to determine valid disk types.
 
 import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -27,7 +26,6 @@ from absl import flags
 import dateutil.parser
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import boot_disk
-from perfkitbenchmarker import custom_virtual_machine_spec
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import provider_info
@@ -49,6 +47,7 @@ PD_EXTREME = 'pd-extreme'
 HYPERDISK_THROUGHPUT = 'hyperdisk-throughput'
 HYPERDISK_EXTREME = 'hyperdisk-extreme'
 HYPERDISK_BALANCED = 'hyperdisk-balanced'
+HYPERDISK_BALANCED_HA = 'hyperdisk-balanced-high-availability'
 GCE_REMOTE_DISK_TYPES = [
     PD_STANDARD,
     PD_SSD,
@@ -57,17 +56,20 @@ GCE_REMOTE_DISK_TYPES = [
     HYPERDISK_THROUGHPUT,
     HYPERDISK_EXTREME,
     HYPERDISK_BALANCED,
+    HYPERDISK_BALANCED_HA,
 ]
 # Defaults picked to align with console.
 GCE_DYNAMIC_IOPS_DISK_TYPE_DEFAULTS = {
     PD_EXTREME: 100000,
     HYPERDISK_EXTREME: 100000,
     HYPERDISK_BALANCED: 3600,
+    HYPERDISK_BALANCED_HA: 3600,
 }
 # Defaults picked to align with console.
 GCE_DYNAMIC_THROUGHPUT_DISK_TYPE_DEFAULTS = {
     HYPERDISK_BALANCED: 290,
     HYPERDISK_THROUGHPUT: 180,
+    HYPERDISK_BALANCED_HA: 290,
 }
 
 REGIONAL_DISK_SCOPE = 'regional'
@@ -100,6 +102,10 @@ DISK_METADATA = {
     HYPERDISK_BALANCED: {
         disk.MEDIA: disk.SSD,
         disk.REPLICATION: disk.ZONE,
+    },
+    HYPERDISK_BALANCED_HA: {
+        disk.MEDIA: disk.SSD,
+        disk.REPLICATION: disk.REGION,
     },
     disk.LOCAL: {
         disk.MEDIA: disk.SSD,
@@ -137,15 +143,6 @@ FIXED_SSD_MACHINE_TYPES = {
 }
 
 NVME_PD_MACHINE_FAMILIES = ['m3']
-# Some machine families cannot use pd-ssd
-HYPERDISK_ONLY_MACHINE_FAMILIES = [
-    'c3a',
-    'n4',
-    'c4',
-]
-# Default boot disk type in pkb.
-# Console defaults to pd-balanced & gcloud defaults to pd-standard as of 11/23
-PKB_DEFAULT_BOOT_DISK_TYPE = PD_BALANCED
 
 
 class GceServiceUnavailableError(Exception):
@@ -313,31 +310,6 @@ class GceBootDisk(boot_disk.BootDisk):
     return result
 
 
-def GetDefaultBootDiskType(machine_type: str) -> str:
-  """Defaults the gce boot disk to pd-balanced/hyperdisk-balanced.
-
-  Console defaults to pd-balanced (ssd) and hyperdisk-balanced (ssd).
-  But gcloud tool defaults to pd-standard (hdd). This is a pkb default to
-  use a slightly better (lower latency) default of pd-balanced.
-  This lets us align with console and boot windows machines without
-  thinking about boot disk.
-
-  Args:
-    machine_type: machine type
-
-  Returns:
-    default boot disk type.
-  """
-  if not machine_type or isinstance(
-      machine_type, custom_virtual_machine_spec.CustomMachineTypeSpec
-  ):
-    return PKB_DEFAULT_BOOT_DISK_TYPE
-  family = machine_type.split('-')[0].lower()
-  if family in HYPERDISK_ONLY_MACHINE_FAMILIES:
-    return HYPERDISK_BALANCED
-  return PKB_DEFAULT_BOOT_DISK_TYPE
-
-
 class GceLocalDisk(disk.BaseDisk):
   """Object representing a GCE Local Disk."""
 
@@ -425,9 +397,9 @@ class GceDisk(disk.BaseDisk):
     if self.multi_writer_disk:
       cmd.flags['access-mode'] = 'READ_WRITE_MANY'
     self.create_disk_start_time = time.time()
-    _, stderr, retcode = cmd.Issue(raise_on_failure=False)
+    stdout, stderr, retcode = cmd.Issue(raise_on_failure=False)
     util.CheckGcloudResponseKnownFailures(stderr, retcode)
-    self.create_disk_end_time = time.time()
+    self.create_disk_end_time = self._GetEndTime(stdout)
 
   def _Delete(self):
     """Deletes the disk."""
@@ -467,10 +439,10 @@ class GceDisk(disk.BaseDisk):
   def Exists(self):
     return self._Exists()
 
-  def _GetAttachEndTime(self, cmd_issue_response: str):
+  def _GetEndTime(self, cmd_issue_response: str):
     """Returns the end time of the attach operation."""
-    attach_end_time = time.time()
-    return attach_end_time
+    end_time = time.time()
+    return end_time
 
   @vm_util.Retry(
       poll_interval=30,
@@ -498,9 +470,11 @@ class GceDisk(disk.BaseDisk):
 
     if self.replica_zones:
       cmd.flags['disk-scope'] = REGIONAL_DISK_SCOPE
+      cmd.flags['region'] = self.region
+
     self.attach_start_time = time.time()
     stdout, stderr, retcode = cmd.Issue(raise_on_failure=False)
-    self.attach_end_time = self._GetAttachEndTime(stdout)
+    self.attach_end_time = self._GetEndTime(stdout)
 
     # Gcloud attach-disk commands may still attach disks despite being rate
     # limited.
@@ -553,8 +527,9 @@ class GceDisk(disk.BaseDisk):
 
     if self.replica_zones:
       cmd.flags['disk-scope'] = REGIONAL_DISK_SCOPE
-    cmd.IssueRetryable()
+    stdout, _ = cmd.IssueRetryable()
     self.attached_vm_name = None
+    self.detach_end_time = self._GetEndTime(stdout)
 
   def GetDevicePath(self):
     """Returns the path to the device inside the VM."""

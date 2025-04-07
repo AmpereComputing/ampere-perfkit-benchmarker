@@ -122,7 +122,10 @@ _MACHINE_TYPE_PREFIX_TO_ARM_ARCH = {
     'm7g': 'graviton3',
     'r6g': 'graviton2',
     'r7g': 'graviton3',
+    'm8g': 'graviton4',
+    'c8g': 'graviton4',
     'r8g': 'graviton4',
+    'i8g': 'graviton4',
     't4g': 'graviton2',
     'im4g': 'graviton2',
     'is4ge': 'graviton2',
@@ -157,6 +160,8 @@ _EFA_V2_MACHINE_TYPES = (
     'trn1n.32xlarge',
 )
 
+_UNSUPPORTED = 'Unsupported'
+
 
 class AwsTransitionalVmRetryableError(Exception):
   """Error for retrying _Exists when an AWS VM is in a transitional state."""
@@ -178,7 +183,7 @@ class AwsVmNotCreatedError(Exception):
   """Error indicating that VM does not have a create_start_time."""
 
 
-class AwsImageNotFoundError(Exception):
+class AwsImageNotFoundError(vm_util.ImageNotFoundError):
   """Error indicating no appropriate AMI could be found."""
 
 
@@ -311,7 +316,11 @@ class AwsDedicatedHost(resource.BaseResource):
         '--auto-placement=off',
         '--quantity=1',
     ]
-    vm_util.IssueCommand(create_cmd)
+    _, stderr, _ = vm_util.IssueCommand(create_cmd, raise_on_failure=False)
+    if _UNSUPPORTED in stderr:
+      raise errors.Benchmarks.UnsupportedConfigError(stderr)
+    if 'InsufficientHostCapacity' in stderr:
+      raise errors.Benchmarks.InsufficientCapacityCloudFailure(stderr)
 
   def _Delete(self):
     if self.id:
@@ -892,7 +901,8 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
           f'echo "{self.user_name} - memlock unlimited" | '
           'sudo tee -a /etc/security/limits.conf'
       )
-    self.RemoteCommand('cd aws-efa-installer; sudo ./efa_installer.sh -y')
+    self.RemoteCommand(
+        'cd aws-efa-installer; sudo ./efa_installer.sh -y --skip-kmod')
     if not self.TryRemoteCommand('ulimit -l | grep unlimited'):
       # efa_installer.sh should reboot enabling this change, reboot if necessary
       self.Reboot()
@@ -1125,7 +1135,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
         stderr,
     ):
       raise errors.Benchmarks.InsufficientCapacityCloudFailure(stderr)
-    if 'Unsupported' in stderr:
+    if _UNSUPPORTED in stderr:
       raise errors.Benchmarks.UnsupportedConfigError(stderr)
     if retcode:
       raise errors.Resource.CreationError(
@@ -1569,15 +1579,31 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     return self.DiskTypeCreatedOnVMCreation(data_disk.disk_type)
 
 
+class BaseLinuxAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.BaseLinuxMixin
+):
+  """Class supporting Linux AWS virtual machines."""
+
+  def _PostCreate(self):
+    super()._PostCreate()
+    nic_queue_counts = aws_flags.AWS_NIC_QUEUE_COUNTS.value
+    if nic_queue_counts:
+      for network_device in nic_queue_counts:
+        device_name, queue_count = network_device.split('=')
+        self.RemoteCommand(
+            f'sudo ethtool -L {device_name} combined {queue_count}'
+        )
+
+
 class ClearBasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.ClearMixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.ClearMixin
 ):
   IMAGE_NAME_FILTER_PATTERN = 'clear/images/*/clear-*'
   DEFAULT_USER_NAME = 'clear'
 
 
 class CoreOsBasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CoreOsMixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.CoreOsMixin
 ):
   IMAGE_NAME_FILTER_PATTERN = 'fedora-coreos-*'
   # CoreOS only distinguishes between stable and testing in the description
@@ -1587,7 +1613,7 @@ class CoreOsBasedAwsVirtualMachine(
 
 
 class Debian11BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Debian11Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.Debian11Mixin
 ):
   # From https://wiki.debian.org/Cloud/AmazonEC2Image/Bullseye
   IMAGE_NAME_FILTER_PATTERN = 'debian-11-{alternate_architecture}-*'
@@ -1602,7 +1628,7 @@ class Debian11BackportsBasedAwsVirtualMachine(
 
 
 class Debian12BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Debian12Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.Debian12Mixin
 ):
   # From https://wiki.debian.org/Cloud/AmazonEC2Image/Bookworm
   IMAGE_NAME_FILTER_PATTERN = 'debian-12-{alternate_architecture}-*'
@@ -1610,7 +1636,7 @@ class Debian12BasedAwsVirtualMachine(
   DEFAULT_USER_NAME = 'admin'
 
 
-class UbuntuBasedAwsVirtualMachine(AwsVirtualMachine):
+class UbuntuBasedAwsVirtualMachine(BaseLinuxAwsVirtualMachine):
   IMAGE_OWNER = UBUNTU_IMAGE_PROJECT
   DEFAULT_USER_NAME = 'ubuntu'
 
@@ -1693,10 +1719,11 @@ ENV LD_LIBRARY_PATH=/opt/aws-ofi-nccl/lib:/opt/amazon/efa:\$LD_LIBRARY_PATH
         'x86_64/mount-s3.deb'
     )
     self.RemoteCommand('sudo apt-get install ./mount-s3.deb')
+    self.RemoteCommand('rm mount-s3.deb')
 
 
 class AmazonLinux2EfaBasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2DLMixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.AmazonLinux2DLMixin
 ):
   """AmazonLinux2 Base DLAMI virtual machine."""
 
@@ -1738,7 +1765,7 @@ class Ubuntu2404BasedAwsVirtualMachine(
 
 
 class AmazonLinux2BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.AmazonLinux2Mixin
 ):
   """Class with configuration for AWS Amazon Linux 2 virtual machines."""
 
@@ -1754,7 +1781,7 @@ class AmazonNeuronBasedAwsVirtualMachine(
 
 
 class AmazonLinux2023BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2023Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.AmazonLinux2023Mixin
 ):
   """Class with configuration for AWS Amazon Linux 2023 virtual machines."""
 
@@ -1762,7 +1789,7 @@ class AmazonLinux2023BasedAwsVirtualMachine(
 
 
 class Rhel8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Rhel8Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.Rhel8Mixin
 ):
   """Class with configuration for AWS RHEL 8 virtual machines."""
 
@@ -1774,7 +1801,7 @@ class Rhel8BasedAwsVirtualMachine(
 
 
 class Rhel9BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Rhel9Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.Rhel9Mixin
 ):
   """Class with configuration for AWS RHEL 9 virtual machines."""
 
@@ -1786,7 +1813,7 @@ class Rhel9BasedAwsVirtualMachine(
 
 
 class RockyLinux8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.RockyLinux8Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.RockyLinux8Mixin
 ):
   """Class with configuration for AWS Rocky Linux 8 virtual machines."""
 
@@ -1796,7 +1823,7 @@ class RockyLinux8BasedAwsVirtualMachine(
 
 
 class RockyLinux9BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.RockyLinux9Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.RockyLinux9Mixin
 ):
   """Class with configuration for AWS Rocky Linux 9 virtual machines."""
 
@@ -1806,7 +1833,7 @@ class RockyLinux9BasedAwsVirtualMachine(
 
 
 class CentOsStream9BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOsStream9Mixin
+    BaseLinuxAwsVirtualMachine, linux_virtual_machine.CentOsStream9Mixin
 ):
   """Class with configuration for AWS CentOS Stream 9 virtual machines."""
 
@@ -2008,6 +2035,14 @@ class Windows2022CoreAwsVirtualMachine(
   )
 
 
+class Windows2025CoreAwsVirtualMachine(
+    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2025CoreMixin
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2025-English-Core-Base'
+  )
+
+
 class Windows2016DesktopAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
     windows_virtual_machine.Windows2016DesktopMixin,
@@ -2032,6 +2067,15 @@ class Windows2022DesktopAwsVirtualMachine(
 ):
   IMAGE_SSM_PATTERN = (
       '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
+  )
+
+
+class Windows2025DesktopAwsVirtualMachine(
+    BaseWindowsAwsVirtualMachine,
+    windows_virtual_machine.Windows2025DesktopMixin,
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base'
   )
 
 

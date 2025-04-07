@@ -109,6 +109,7 @@ _METADATA_PREEMPT_CMD = (
 _MACHINE_TYPE_PREFIX_TO_ARM_ARCH = {
     't2a': 'neoverse-n1',
     'c3a': 'ampere1',
+    'c4a': 'neoverse-v2',
 }
 # The A2 and A3 machine families, unlike some other GCP offerings, have a
 # preset type and number of GPUs, so we set those attributes directly from the
@@ -130,6 +131,7 @@ _FIXED_GPU_MACHINE_TYPES = {
     'a3-highgpu-2g': (virtual_machine.GPU_H100, 2),
     'a3-highgpu-4g': (virtual_machine.GPU_H100, 4),
     'a3-highgpu-8g': (virtual_machine.GPU_H100, 8),
+    'a3-megagpu-8g': (virtual_machine.GPU_H100, 8),
     # L4 GPUs
     # https://cloud.google.com/compute/docs/accelerator-optimized-machines#g2-vms
     'g2-standard-4': (virtual_machine.GPU_L4, 1),
@@ -197,8 +199,6 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
     self.min_node_cpus: int = None
     self.subnet_names: List[str] = None
     super().__init__(*args, **kwargs)
-    if not self.boot_disk_type:
-      self.boot_disk_type = gce_disk.GetDefaultBootDiskType(self.machine_type)
     self.boot_disk_spec = boot_disk.BootDiskSpec(
         self.boot_disk_size,
         self.boot_disk_type,
@@ -375,7 +375,8 @@ class GceSoleTenantNodeTemplate(resource.BaseResource):
     )
     cmd.flags['node-type'] = self.node_type
     cmd.flags['region'] = self.region
-    cmd.Issue()
+    _, stderr, retcode = cmd.Issue(raise_on_failure=False)
+    util.CheckGcloudResponseKnownFailures(stderr, retcode)
 
   def _Exists(self):
     """Returns True if the node template exists."""
@@ -561,7 +562,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.disks = [self.boot_disk]
     self.id = None
     self.node_type = vm_spec.node_type
-    self.node_group = None
+    self.host = None
     self.use_dedicated_host = vm_spec.use_dedicated_host
     self.num_vms_per_host = vm_spec.num_vms_per_host
     self.min_cpu_platform = vm_spec.min_cpu_platform
@@ -748,8 +749,8 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     if not self.automatic_restart:
       cmd.flags['no-restart-on-failure'] = True
     self.metadata['automatic_restart'] = self.automatic_restart
-    if self.node_group:
-      cmd.flags['node-group'] = self.node_group.name
+    if self.host:
+      cmd.flags['node-group'] = self.host.name
     if self.gce_shielded_secure_boot:
       cmd.flags['shielded-secure-boot'] = True
 
@@ -919,7 +920,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
             )
             self.host_list.append(host)
             host.Create()
-          self.node_group = self.host_list[-1]
+          self.host = self.host_list[-1]
         raise errors.Resource.RetryableCreationError()
     if (
         not self.use_dedicated_host
@@ -1002,9 +1003,9 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
           host = GceSoleTenantNodeGroup(self.node_type, self.zone, self.project)
           self.host_list.append(host)
           host.Create()
-        self.node_group = self.host_list[-1]
+        self.host = self.host_list[-1]
         if self.num_vms_per_host:
-          self.node_group.fill_fraction += 1.0 / self.num_vms_per_host
+          self.host.fill_fraction += 1.0 / self.num_vms_per_host
 
     # Capture the public key, write it to a temp file, and save the filename.
     with open(self.ssh_public_key) as f:
@@ -1017,13 +1018,13 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
       self.create_cmd = self._GenerateCreateCommand(tf.name)
 
   def _DeleteDependencies(self):
-    if self.node_group:
+    if self.host:
       with self._host_lock:
-        if self.node_group in self.host_list:
-          self.host_list.remove(self.node_group)
-        if self.node_group not in self.deleted_hosts:
-          self.node_group.Delete()
-          self.deleted_hosts.add(self.node_group)
+        if self.host in self.host_list:
+          self.host_list.remove(self.host)
+        if self.host not in self.deleted_hosts:
+          self.host.Delete()
+          self.deleted_hosts.add(self.host)
 
   def _ParseDescribeResponse(self, describe_response):
     """Sets the ID and IP addresses from a response to the describe command.
@@ -1289,11 +1290,8 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
 
     time.sleep(LM_UNAVAILABLE_STATUS_WAIT_TIME_MIN * 60)
     stdout, _, retcode = logcmd.Issue(raise_on_failure=False)
-    if retcode or 'error' in stdout:
-      raise errors.VirtualMachine.VirtualMachineError(
-          'Unable to get logs for simulate maintenance event.'
-      )
-    elif 'MIGRATION_TEMPORARILY_UNAVAILABLE' in stdout:
+    # if the migration is temporarily unavailable, retry the migration command
+    if not retcode and 'MIGRATION_TEMPORARILY_UNAVAILABLE' in stdout:
       stdout, _, retcode = cmd.Issue(raise_on_failure=False)
       if retcode or 'error' in stdout:
         raise errors.VirtualMachine.VirtualMachineError(
@@ -1763,6 +1761,18 @@ class CosDevBasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
   DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-dev'
 
 
+class Cos117BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS117
+  DEFAULT_X86_IMAGE_FAMILY = 'cos-117-lts'
+  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-117-lts'
+
+
+class Cos113BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS113
+  DEFAULT_X86_IMAGE_FAMILY = 'cos-113-lts'
+  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-113-lts'
+
+
 class Cos109BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
   OS_TYPE = os_types.COS109
   DEFAULT_X86_IMAGE_FAMILY = 'cos-109-lts'
@@ -1773,12 +1783,6 @@ class Cos105BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
   OS_TYPE = os_types.COS105
   DEFAULT_X86_IMAGE_FAMILY = 'cos-105-lts'
   DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-105-lts'
-
-
-class Cos101BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
-  OS_TYPE = os_types.COS101
-  DEFAULT_X86_IMAGE_FAMILY = 'cos-101-lts'
-  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-101-lts'
 
 
 class CoreOsBasedGceVirtualMachine(
@@ -1815,6 +1819,41 @@ class Ubuntu2404BasedGceVirtualMachine(
   DEFAULT_IMAGE_PROJECT = 'ubuntu-os-cloud'
 
 
+class Debian12DeepLearningBasedGceVirtualMachine(
+    BaseLinuxGceVirtualMachine, linux_vm.Debian12DLMixin
+):
+  """Debian12 based Deeplearning image."""
+
+  # This is an self-made image that follow instructions from
+  # https://github.com/GoogleCloudPlatform/cluster-toolkit/blob/main/examples/machine-learning/a3-megagpu-8g/slurm-a3mega-image.yaml
+  DEFAULT_IMAGE_PROJECT = ''
+  DEFAULT_X86_IMAGE_FAMILY = 'slurm-a3mega'
+
+  def __init__(self, vm_spec):
+    """Initialize a Debian12 Base DLVM virtual machine.
+
+    Args:
+      vm_spec: virtual_machine.BaseVirtualMachineSpec object of the vm.
+
+    Raises:
+      ValueError: If an incompatible vm_spec is passed.
+    """
+    super().__init__(vm_spec)
+    self._installed_packages.add('slurm')
+    self._installed_packages.add('cuda_toolkit')
+
+  def PrepareVMEnvironment(self):
+    super().PrepareVMEnvironment()
+    self.Install('tcpxo')
+    self.RemoteCommand('sudo mkdir -p /etc/slurm/', ignore_failure=True)
+    self.RemoteCommand(
+        'echo "cgroupPlugin=cgroup/v2" >> cgroup.conf; '
+        'echo "ConstrainCores=no" >> cgroup.conf; '
+        'echo "ConstrainRAMSpace=no" >> cgroup.conf; '
+    )
+    self.RemoteCommand('sudo mv cgroup.conf /etc/slurm/')
+
+
 def GenerateDownloadPreprovisionedDataCommand(
     install_path: str, module_name: str, filename: str
 ) -> str:
@@ -1848,7 +1887,7 @@ def GenerateStatPreprovisionedDataCommand(
   Returns:
     The gcloud command to run.
   """
-  return 'gsutil stat gs://%s/%s/%s' % (
+  return 'gcloud storage ls gs://%s/%s/%s' % (
       FLAGS.gcp_preprovisioned_data_bucket,
       module_name,
       filename,

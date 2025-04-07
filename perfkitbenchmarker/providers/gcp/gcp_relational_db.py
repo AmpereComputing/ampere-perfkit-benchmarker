@@ -36,6 +36,7 @@ from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker import sqlserver_iaas_relational_db
+from perfkitbenchmarker import timescaledb_iaas_relational_db
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import gce_network
 from perfkitbenchmarker.providers.gcp import util
@@ -167,6 +168,13 @@ class GCPOmniPostgresIAASRelationalDb(
   CLOUD = provider_info.GCP
 
 
+class GCPTimescaleDbPostgresIAASRelationalDb(
+    timescaledb_iaas_relational_db.TimescaleDbIAASRelationalDb
+):
+  """A TimescaleDB Postgres IAAS database resource."""
+  CLOUD = provider_info.GCP
+
+
 class GCPRelationalDb(relational_db.BaseRelationalDb):
   """A GCP CloudSQL database resource.
 
@@ -256,6 +264,15 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     cmd = util.GcloudCommand(*cmd_string)
     cmd.flags['project'] = self.project
     cmd.use_beta_gcloud = True
+
+    if self.spec.db_tier:
+      cmd.flags['edition'] = self.spec.db_tier
+      cmd.use_alpha_gcloud = True
+      cmd.use_beta_gcloud = False
+      if relational_db.ENABLE_DATA_CACHE.value:
+        cmd.flags['enable-data-cache'] = True
+      else:
+        cmd.flags['no-enable-data-cache'] = True
 
     _, stderr, retcode = cmd.Issue(timeout=CREATION_TIMEOUT)
 
@@ -525,6 +542,14 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
 
     if not self._IsReady():
       raise RuntimeError('Instance could not be set to ready after reboot')
+
+  def GetResourceMetadata(self):
+    metadata = super().GetResourceMetadata()
+    if relational_db.ENABLE_DATA_CACHE.value:
+      metadata['db_flags'] = metadata.get('db_flags', []) + [
+          'enable-data-cache'
+      ]
+    return metadata
 
   @staticmethod
   def GetDefaultEngineVersion(engine):

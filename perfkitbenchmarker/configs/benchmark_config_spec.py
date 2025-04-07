@@ -42,6 +42,8 @@ from perfkitbenchmarker.resources import jobs_setter
 # Included to import & load Kubernetes' __init__.py somewhere.
 from perfkitbenchmarker.resources import kubernetes  # pylint:disable=unused-import
 from perfkitbenchmarker.resources import managed_ai_model_spec
+from perfkitbenchmarker.resources.pinecone import pinecone_resource_spec
+
 
 _NONE_OK = {'default': None, 'none_ok': True}
 
@@ -211,6 +213,13 @@ class _DpbServiceSpec(spec.BaseSpec):
             option_decoders.IntDecoder,
             {'default': None, 'none_ok': True},
         ),
+        'dataproc_serverless_runtime_engine': (
+            option_decoders.EnumDecoder,
+            {
+                'valid_values': ('default', 'native'),
+                'default': 'default',
+            },
+        ),
         'dataproc_serverless_memory_overhead': (
             option_decoders.IntDecoder,
             {'default': None, 'none_ok': True},
@@ -347,7 +356,7 @@ class _ManagedAiModelSpecDecoder(option_decoders.TypeVerifier):
       cloud = flag_values['cloud'].value
       providers.LoadProvider(cloud)
       spec_class = managed_ai_model_spec.GetManagedAiModelSpecClass(
-          cloud, config['model_name']
+          cloud, config['model_name'], config['model_size']
       )
     else:
       raise errors.Config.InvalidValue(
@@ -848,7 +857,10 @@ class _MemoryStoreSpec(spec.BaseSpec):
             option_decoders.EnumDecoder,
             {
                 'default': None,
-                'valid_values': managed_memory_store.REDIS_VERSIONS,
+                'valid_values': (
+                    managed_memory_store.REDIS_VERSIONS
+                    + managed_memory_store.VALKEY_VERSIONS
+                ),
             },
         ),
         'service_type': (
@@ -862,6 +874,7 @@ class _MemoryStoreSpec(spec.BaseSpec):
                 'valid_values': [
                     managed_memory_store.REDIS,
                     managed_memory_store.MEMCACHED,
+                    managed_memory_store.VALKEY,
                 ],
             },
         ),
@@ -885,6 +898,8 @@ class _MemoryStoreSpec(spec.BaseSpec):
       config_values['zone'] = flag_values.zone[0]
     if flag_values['managed_memory_store_version'].present:
       config_values['version'] = flag_values.managed_memory_store_version
+    if flag_values['managed_memory_store_type'].present:
+      config_values['memory_store_type'] = flag_values.managed_memory_store_type
     if flag_values['managed_memory_store_service_type'].present:
       config_values['service_type'] = (
           flag_values.managed_memory_store_service_type
@@ -1420,6 +1435,10 @@ class BenchmarkConfigSpec(spec.BaseSpec):
             },
         ),
         'ai_model': (_ManagedAiModelSpecDecoder, {'default': None}),
+        'pinecone': (
+            pinecone_resource_spec.PineconeResourcesDecoder,
+            {'default': None},
+        ),
         'data_discovery_service': (
             _DataDiscoveryServiceDecoder,
             {

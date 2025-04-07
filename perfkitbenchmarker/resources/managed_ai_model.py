@@ -19,6 +19,7 @@ resource, but the customer pays for the underlying resources it runs on, rather
 than simply for calls like with an API. This also gives the customer more
 control & ownership.
 """
+import logging
 import time
 from typing import Any
 
@@ -26,20 +27,39 @@ from absl import flags
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import sample
+from perfkitbenchmarker import virtual_machine
+from perfkitbenchmarker.resources import managed_ai_model_spec
 
 FLAGS = flags.FLAGS
 
 
 class BaseManagedAiModel(resource.BaseResource):
-  """A managed AI model."""
+  """A managed AI model.
+
+  Attributes:
+    model_name: The official name of the model, e.g. Llama2.
+    region: The region, derived from the zone.
+    vm: A way to run commands on the machine.
+    child_models: A list of child models that were created with
+      InitializeNewModel.
+    max_scaling: The max number of nodes to scale to.
+  """
 
   RESOURCE_TYPE = 'BaseManagedAiModel'
   REQUIRED_ATTRS = ['CLOUD']
 
   region: str
   child_models: list['BaseManagedAiModel'] = []
+  vm: virtual_machine.BaseVirtualMachine
+  model_name: str
+  max_scaling: int
 
-  def __init__(self, **kwargs):
+  def __init__(
+      self,
+      model_spec: managed_ai_model_spec.BaseManagedAiModelSpec,
+      vm: virtual_machine.BaseVirtualMachine,
+      **kwargs,
+  ):
     super().__init__(**kwargs)
     if not FLAGS.zone:
       raise errors.Setup.InvalidConfigurationError(
@@ -49,12 +69,16 @@ class BaseManagedAiModel(resource.BaseResource):
     self.region: str = self.GetRegionFromZone(FLAGS.zone[0])
     self.response_timings: list[float] = []
     self.child_models = []
+    self.model_name = model_spec.model_name
+    self.max_scaling = model_spec.max_scale
     self.metadata.update({
+        'max_scaling': self.max_scaling,
         'region': self.region,
         # Add these to general ResourceMetadata rather than just Create/Delete.
         'resource_type': self.RESOURCE_TYPE,
         'resource_class': self.__class__.__name__,
     })
+    self.vm: virtual_machine.BaseVirtualMachine = vm
 
   def InitializeNewModel(self) -> 'BaseManagedAiModel':
     """Returns a new instance of the same class."""
@@ -91,10 +115,40 @@ class BaseManagedAiModel(resource.BaseResource):
         'ListExistingModels is not implemented for this model type.'
     )
 
+  def _IsReady(self):
+    """Return true if the underlying resource is ready.
+
+    Supplying this method is optional.  Use it when a resource can exist
+    without being ready.  If the subclass does not implement
+    it then it just returns true.
+
+    Returns:
+      True if the resource was ready in time, False if the wait timed out.
+    """
+    try:
+      self.SendPrompt('What is 2 + 2?', 100, 1.0)
+    except errors.Resource.GetError as ex:
+      logging.info('Tried sending prompt but got error %s', ex)
+      return False
+    return True
+
   def SendPrompt(
       self, prompt: str, max_tokens: int, temperature: float, **kwargs: Any
   ) -> list[str]:
-    """Sends a prompt to the model, times it, and returns the response."""
+    """Sends a prompt to the model, times it, and returns the response.
+
+    Args:
+      prompt: The prompt to send.
+      max_tokens: The max tokens to return.
+      temperature: The temperature to use.
+      **kwargs: Additional arguments to pass to _SendPrompt.
+
+    Throws:
+      errors.Resource.GetError if the prompt fails.
+
+    Returns:
+      The response from the model.
+    """
     start_time = time.time()
     response = self._SendPrompt(prompt, max_tokens, temperature, **kwargs)
     end_time = time.time()
@@ -107,6 +161,12 @@ class BaseManagedAiModel(resource.BaseResource):
     """Sends a prompt to the model and returns the response."""
     raise NotImplementedError(
         'SendPrompt is not implemented for this model type.'
+    )
+
+  def GetPromptCommand(self, prompt: str, max_tokens: int, temperature: float):
+    """Returns the command needed to send a prompt to the model."""
+    raise NotImplementedError(
+        'GetPromptCommand is not implemented for this model type.'
     )
 
   def GetSamples(self) -> list[sample.Sample]:

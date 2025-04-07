@@ -87,9 +87,12 @@
 -   Remove EOL Ubuntu 16, 18, and 23.10.
 -   Remove Broken Juju and Ubuntu Container OS types.
 -   Remove support for installing Python 2 in VMs.
+-   Make Ubuntu 24 the default os_type.
+-   Merged redundant `--runspec_build_tool_version` with `--gcc_version`.
 
 ### New features:
 
+-   Add support for TimescaleDB
 -   Add support for Omni
 -   Add support for systems running fedora36 and fedora37
 -   Add support for AlloyDB on GCP
@@ -171,7 +174,7 @@
 -   Add support for multi-network creation/attachment. PKB currently does not
     handle subnet creation on an existing network.
 -   Add support for GCE Confidential VM's.
--   Add cos-dev, cost109, cos105, and cos101 OS support for GCP.
+-   Add cos-dev, cos117, cos113, cos109, and cos105 OS support for GCP.
 -   Add --object_ttl_days flag for lifecycle management of created buckets.
 -   Add support for multi-NIC netperf throughput on AWS.
 -   Added AWS/GCP support for Data Plane Development Kit (DPDK) on Linux VM's to
@@ -197,9 +200,21 @@
 -   Add unmanaged_mysql_sysbench benchmark.
 -   Refactor nginx_benchmark to use reverse_proxy or api_gateway configurations.
 -   Add support for simple Vertex AI & AWS Sagemaker managed models.
+-   Add new pressure_stall trace.
+-   Add `--skip_teardown_on_command_timeout` flag to skip teardown if the
+    failure substatus is COMMAND_TIMEOUT.
+-   Use Artifact Registry instead of the deprecated Google Container Registry
+-   Add `--capture_vm_logs` flag, which prompts PKB to capture `syslog`,
+    `journalctl`, and `sos report` (if supported) logs from Linux test VMs.
+-   Add `--vm_log_bucket` flag, offering users the option to upload the logs
+    captured via the `--capture_vm_logs` flag to a GCS bucket.
+-   Add chromium_compile_benchmark.
+-   Add unmanaged_postgresql_sysbench benchmark.
 
 ### Enhancements:
 
+-   Add numactl and perf support to netperf for analysis
+-   Additions to MongoDB in Artemis/PKB to facilitate workload analysis
 -   Updated `sar` switch to efficiently collect all sar metrics during the run,
     and download the file for hands-on analysis (no parsing).
 -   Added delay_time support for delete operations in object storage service.
@@ -351,6 +366,12 @@
     clobber --gce_network_name.
 -   Add support of externalizing the HADOOP_NAMENODE_OPTS.
 -   Use Azure Gen 2 VMs by default.
+-   Publish a `kernel_start_to_ssh` metric in the Cluster Boot benchmark
+    (requires `--cluster_boot_linux_boot_metrics` flag).
+-   Publish a `Host Create Latency` metric in the Cluster Boot benchmark
+-   Added `ss` switch to gather TCP/UDP socket perf stats
+-   Add support for Windows 2025 on AWS, Azure, and GCP.
+-   Add support for Redis Cluster mode on VMs.
 
 ### Bug fixes and maintenance updates:
 
@@ -509,3 +530,8 @@
 -   Update OpenJDK version to default on Debian based OSes and latest on Red Hat
     based OSes.
 -   Update Chromium version to 127.0.6533.88.
+-   Update bigtable_walkthrough/README.md to help reduce the user frictions.
+-   Remove default boot_disk_type in GCP.
+-   Update AWS and Azure default disks to gp3 and PremiumV2_LRS respectively.
+-   When `--ycsb_commit` is set, YCSB at the given commit can be pulled into
+    `YCSB_DIR` even if the directory already exists.

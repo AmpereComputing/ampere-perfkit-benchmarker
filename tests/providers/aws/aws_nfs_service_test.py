@@ -321,6 +321,10 @@ class AwsVirtualMachineTest(BaseTest):
 
   def testCreateLocalDisk(self):
     # show that the non-NFS case formats the disk
+    readlink_cmd = 'readlink -f /dev/xvdb'
+    is_mount_cmd = (
+        'mount | grep "/dev/xvdb on /scratch" | wc -l'
+    )
     format_cmd = (
         '[[ -d /mnt ]] && sudo umount /mnt; '
         'sudo mke2fs -F -E lazy_itable_init=0,discard -O ^has_journal '
@@ -345,10 +349,23 @@ class AwsVirtualMachineTest(BaseTest):
     aws_machine.create_disk_strategy.GetSetupDiskStrategy.return_value = (
         setup_local_disk_strategy
     )
+    aws_machine.RemoteHostCommand.side_effect = [
+        ('/dev/xvdb', ''),
+        ('0', ''),
+        ('0', ''),
+        ('0', ''),
+        ('0', ''),
+    ]
 
     aws_machine.SetupAllScratchDisks()
     self.assertEqual(
-        [mock.call(format_cmd), mock.call(mount_cmd), mock.call(fstab_cmd)],
+        [
+            mock.call(readlink_cmd),
+            mock.call(is_mount_cmd),
+            mock.call(format_cmd),
+            mock.call(mount_cmd),
+            mock.call(fstab_cmd),
+        ],
         aws_machine.RemoteHostCommand.call_args_list,
     )
 

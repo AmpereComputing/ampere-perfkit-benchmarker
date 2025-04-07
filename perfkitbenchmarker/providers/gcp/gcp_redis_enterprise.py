@@ -51,6 +51,11 @@ _OPS_PER_SEC = flags.DEFINE_integer(
     10000,
     'The number of operations per second for the redis instance.',
 )
+_ENABLE_VECTOR_SEARCH = flags.DEFINE_bool(
+    'redis_cloud_vector_search',
+    False,
+    'Whether to enable vector search for the redis instance.',
+)
 
 FLAGS = flags.FLAGS
 
@@ -89,12 +94,14 @@ class GcpRedisEnterprise(managed_memory_store.BaseManagedMemoryStore):
     super().__init__(spec)
     self.name = f'pkb-{FLAGS.run_uri}'
     self.project = FLAGS.project or util.GetDefaultProject()
-    self.redis_region = FLAGS.cloud_redis_region
+    self.redis_region = managed_memory_store.REGION.value
     self.subscription_id = ''
     self.database_id = ''
     self.version = REDIS_VERSION_MAPPING[spec.version]
     self.shard_info: _ShardConfiguration = None
     self.peering_name = f'pkb-redis-cloud-peering-{FLAGS.run_uri}'
+    self.multi_az = len(self.zones) > 1
+    self.metadata['multi_az'] = self.multi_az
 
     self._request_headers = None
 
@@ -129,9 +136,7 @@ class GcpRedisEnterprise(managed_memory_store.BaseManagedMemoryStore):
         'redis_cloud_shard_dollars_per_hr': self.shard_info.dollars_per_hr,
         'redis_cloud_shard_size_gb': self.shard_info.size_gb,
         'cloud_redis_region': self.redis_region,
-        'cloud_redis_version': managed_memory_store.ParseReadableVersion(
-            self.version
-        ),
+        'cloud_redis_version': self.GetReadableVersion(),
         'shard_count': self.shard_count,
         'replicas_per_shard': self.replicas_per_shard,
         'node_count': self.node_count,
@@ -212,6 +217,21 @@ class GcpRedisEnterprise(managed_memory_store.BaseManagedMemoryStore):
     }
     if self.zones:
       region_config['preferredAvailabilityZones'] = self.zones
+    database_config = {
+        'name': f'pkb-{FLAGS.run_uri}',
+        'protocol': 'redis',
+        'datasetSizeInGb': _GB.value,
+        'supportOSSClusterApi': self.clustered,
+        'dataPersistence': 'none',
+        'replication': self.replicas_per_shard > 0,
+        'throughputMeasurement': {
+            'by': 'operations-per-second',
+            'value': _OPS_PER_SEC.value,
+        },
+        'quantity': 1,
+    }
+    if _ENABLE_VECTOR_SEARCH.value:
+      database_config['modules'] = [{'name': 'RediSearch'}]
     return {
         'name': self.name,
         'deploymentType': 'single-region',
@@ -220,28 +240,18 @@ class GcpRedisEnterprise(managed_memory_store.BaseManagedMemoryStore):
             'provider': 'GCP',
             'regions': [region_config],
         }],
-        'databases': [{
-            'name': f'pkb-{FLAGS.run_uri}',
-            'protocol': 'redis',
-            'datasetSizeInGb': _GB.value,
-            'supportOSSClusterApi': self._clustered,
-            'dataPersistence': 'none',
-            'replication': self.replicas_per_shard > 0,
-            'throughputMeasurement': {
-                'by': 'operations-per-second',
-                'value': _OPS_PER_SEC.value,
-            },
-            'quantity': 1,
-        }],
+        'databases': [database_config],
         'redisVersion': self.version,
     }
 
   def _Create(self):
     """Creates the instance."""
+    create_args = self._GetCreateArgs()
+    logging.info('Create subscription request: %s', create_args)
     result = requests.post(
         f'{_REDIS_API_URL}/subscriptions',
         headers=self.request_headers,
-        json=self._GetCreateArgs(),
+        json=create_args,
     )
     logging.info('Create subscription response: %s', result.text)
     task = self._GetTask(result.json()['taskId'])
@@ -304,7 +314,7 @@ class GcpRedisEnterprise(managed_memory_store.BaseManagedMemoryStore):
     )
     self.shard_info = self._GetShardType(subscription, database)
     self.shard_count = self.shard_info.quantity
-    self.node_count = self._GetNodeCount()
+    self.node_count = self.shard_count * (1 + self.replicas_per_shard)
 
   def _GetDatabase(self):
     """Returns the database associated with the subscription."""

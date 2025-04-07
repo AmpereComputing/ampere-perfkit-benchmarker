@@ -31,7 +31,7 @@ flags.DEFINE_boolean(
 )
 flags.DEFINE_integer(
     'sar_interval',
-    5,
+    1,
     'sar sample collection frequency, in seconds. Only '
     'applicable when --sar is specified.',
 )
@@ -51,13 +51,9 @@ class _SarCollector(base_collector.BaseCollector):
     vm.InstallPackages('sysstat')
 
   def _CollectorRunCommand(self, vm, collector_file):
-    # this starts sar in the background and returns the pid
-    cmd = (
-        'sar -o {output} {sar_interval} &>/dev/null & echo $!'
-    ).format(
-        output=collector_file,
-        sar_interval=FLAGS.sar_interval,
-    )
+    """Starts sar in the background and returns the pid."""
+    # NOTE that &>/dev/null is IMPORTANT, otherwise the command will get stuck
+    cmd = f'sar -o {collector_file} {FLAGS.sar_interval} &>/dev/null & echo $!'
     return cmd
 
 

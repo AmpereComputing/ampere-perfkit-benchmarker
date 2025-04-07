@@ -385,6 +385,11 @@ flags.DEFINE_integer(
     'The time in seconds to sleep after the prepare phase. This can be useful '
     'for letting burst tokens accumulate.',
 )
+BETWEEN_RUNS_SLEEP_TIME = flags.DEFINE_integer(
+    'between_runs_sleep_time',
+    0,
+    'The time in seconds to sleep between runs.',
+)
 flags.DEFINE_integer(
     'after_run_sleep_time',
     0,
@@ -430,6 +435,9 @@ flags.DEFINE_bool(
 )
 flags.DEFINE_boolean(
     'record_lscpu', True, 'Whether to record the lscpu output in a sample'
+)
+flags.DEFINE_boolean(
+    'record_ulimit', False, 'Whether to record the ulimit output in a sample'
 )
 RECORD_PROCCPU = flags.DEFINE_boolean(
     'record_proccpu',
@@ -496,6 +504,11 @@ SKIP_TEARDOWN_CONDITIONS = flags.DEFINE_list(
     'flag must have a spearate teardown procedure in place for resources with '
     'extended uptimes.',
 )
+SKIP_TEARDOWN_ON_COMMAND_TIMEOUT = flags.DEFINE_boolean(
+    'skip_teardown_on_command_timeout',
+    False,
+    'If true, skip teardown if the failure substatus is COMMAND_TIMEOUT.',
+)
 SKIP_TEARDOWN_ZONAL_VM_LIMIT = flags.DEFINE_integer(
     'skip_teardown_zonal_vm_limit',
     None,
@@ -511,4 +524,10 @@ SKIP_TEARDOWN_KEEP_UP_MINUTES = flags.DEFINE_integer(
     'This is used to annotate the "timeout_utc" tag for resources that are '
     'kept alive through the --skip_teardown_conditions flag.\n'
     'Only implemented for GCE VMs.',
+)
+CAPTURE_VM_LOGS = flags.DEFINE_bool(
+    'capture_vm_logs',
+    False,
+    'Enables capture of VM logs. Currently limited to Linux syslogs, '
+    'journalctl, and sos report.',
 )

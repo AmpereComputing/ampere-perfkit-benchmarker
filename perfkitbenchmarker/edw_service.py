@@ -125,6 +125,23 @@ flags.DEFINE_enum(
     ['JDBC'],
     'The Runtime Interface used when interacting with Snowflake.',
 )
+flags.DEFINE_boolean(
+    'edw_get_service_auxiliary_metrics',
+    'False',
+    'If set, the benchmark will collect service-specific metrics from the'
+    ' remote service after the benchmark has completed. Additional delay may be'
+    ' incurred due to the need to wait for metadata propogation.',
+)
+flags.DEFINE_enum(
+    'edw_bq_feature_config',
+    'default',
+    ['default', 'smallquery'],
+    'Selects from among various BigQuery feature configurations. '
+    'Currently supported: default (no special features), smallquery '
+    '(enables job_creation_optional query preview feature). '
+    'Only supported for Python client.',
+)
+
 
 FLAGS = flags.FLAGS
 
@@ -263,7 +280,11 @@ class EdwClientInterface:
     """
     raise NotImplementedError
 
-  def ExecuteThroughput(self, concurrency_streams: List[List[str]]) -> str:
+  def ExecuteThroughput(
+      self,
+      concurrency_streams: List[List[str]],
+      labels: dict[str, str] | None = None,
+  ) -> str:
     """Executes a throughput test and returns performance details.
 
     Response format:
@@ -295,6 +316,9 @@ class EdwClientInterface:
     Args:
       concurrency_streams: List of streams to execute simultaneously, each of
         which is a list of string names of queries.
+      labels: A dictionary of labels to apply to the query for service-side
+        tracking and analysis. Must include the mandatory label
+        'minimal_run_key', which should be unique per individual iteration.
 
     Returns:
       A serialized dictionary of execution details.
@@ -521,3 +545,20 @@ class EdwService(resource.BaseResource):
       A boolean value (True) if the warm suite is recommended.
     """
     return True
+
+  def GetIterationAuxiliaryMetrics(self, iter_run_key: str) -> Dict[str, Any]:
+    """Returns service-specific metrics derived from server-side metadata.
+
+      Must be run after the benchmark has completed.
+
+    Args:
+      iter_run_key: The unique identifier of the run and iteration to fetch
+        metrics for.
+
+    Returns:
+      A dictionary of the following format:
+        { 'metric_1': { 'value': 1, 'unit': 'imperial femtoseconds' },
+          'metric_2': { 'value': 2, 'unit': 'metric dollars' }
+        ...}
+    """
+    raise NotImplementedError

@@ -87,7 +87,7 @@ _YCSB_TAR_URL = flags.DEFINE_string(
 _YCSB_COMMIT = flags.DEFINE_string(
     'ycsb_commit',
     None,
-    'If supplied, pulls YCSB from GitHub using the specified commit SHA.'
+    'If supplied, pulls YCSB from GitHub using the specified commit SHA.',
 )
 _YCSB_BINDING = flags.DEFINE_string(
     'ycsb_binding',
@@ -166,7 +166,8 @@ _STATUS = flags.DEFINE_bool(
     'ycsb_status',
     False,
     'If true, run prints status which includes a throughput and latency time'
-    ' series and includes the results in the samples.',
+    ' series and includes the results in the samples. Requires'
+    ' --ycsb_measurement_type=HDRHISTOGRAM.',  # see line 646 below
 )
 _STATUS_INTERVAL_SEC = flags.DEFINE_integer(
     'ycsb_status_interval_sec',
@@ -203,7 +204,7 @@ flags.DEFINE_integer(
     'dataset of records total. Overrides recordcount value in '
     'all workloads of this run. Defaults to None, where '
     'recordcount value in each workload is used. If neither '
-    'is not set, ycsb default of 0 is used.',
+    'is set, ycsb default of 0 is used.',
 )
 flags.DEFINE_integer(
     'ycsb_operation_count', None, 'Number of operations *per client VM*.'
@@ -499,8 +500,8 @@ DEFAULT_PRELOAD_THREADS = 32
 _ycsb_tar_url = None
 
 # Parameters for incremental workload. Can be made into flags in the future.
-_INCREMENTAL_STARTING_QPS = 500
-_INCREMENTAL_TIMELIMIT_SEC = 60 * 5
+INCREMENTAL_STARTING_QPS = 500
+INCREMENTAL_TIMELIMIT_SEC = 60 * 5
 
 # The upper-bound number of milliseconds above the measured minimum after which
 # to stop the test.
@@ -710,8 +711,11 @@ def Install(vm):
   )
   if _YCSB_COMMIT.value:
     vm.RemoteCommand(
-        f'git clone {GITHUB_URL} {YCSB_DIR}; cd {YCSB_DIR} && git checkout'
-        f' {_YCSB_COMMIT.value};'
+        f'mkdir -p {YCSB_DIR} && cd {YCSB_DIR} && git init && (git config'
+        # Check to see if the origin remote already exists before adding. This
+        # avoids a "remote already exists" error.
+        f' remote.origin.url >&- || git remote add origin {GITHUB_URL}.git) &&'
+        f' git fetch origin && git checkout {_YCSB_COMMIT.value};'
     )
     build_cmd = f'{linux_packages.INSTALL_DIR}/maven/bin/mvn clean package'
     if _YCSB_BINDING.value:
@@ -807,11 +811,18 @@ class YCSBExecutor:
         their own keyspace.
     burst_time_offset_sec: When running with --ycsb_burst_load, the amount of
       seconds to offset time series measurements during the increased load.
+    environment: Environment variables to set before running YCSB.
   """
 
   FLAG_ATTRIBUTES = 'cp', 'jvm-args', 'target', 'threads'
 
-  def __init__(self, database, parameter_files=None, **kwargs):
+  def __init__(
+      self,
+      database,
+      parameter_files=None,
+      environment: dict[str, str] = None,
+      **kwargs,
+  ):
     self.database = database
     self.loaded = False
     self.measurement_type = FLAGS.ycsb_measurement_type
@@ -829,9 +840,20 @@ class YCSBExecutor:
 
     self.burst_time_offset_sec = 0
 
-  def _BuildCommand(self, command_name, parameter_files=None, **kwargs):
+    self.environment = environment or {}
+
+  def _BuildCommand(
+      self,
+      command_name,
+      parameter_files=None,
+      **kwargs,
+  ):
     """Builds the YCSB command line."""
-    command = [YCSB_EXE, command_name, self.database]
+    command = []
+    if self.environment:
+      env_str = ' '.join([f'{k}={v}' for k, v in self.environment.items()])
+      command = [env_str]
+    command.extend([YCSB_EXE, command_name, self.database])
 
     parameters = self.parameters.copy()
     parameters.update(kwargs)
@@ -1384,9 +1406,9 @@ class YCSBExecutor:
 
     return samples + burst_samples
 
-  def _GetIncrementalQpsTargets(self, target_qps: int) -> list[int]:
+  def GetIncrementalQpsTargets(self, target_qps: int) -> list[int]:
     """Returns incremental QPS targets."""
-    qps = _INCREMENTAL_STARTING_QPS
+    qps = INCREMENTAL_STARTING_QPS
     result = []
     while qps < target_qps:
       result.append(qps)
@@ -1427,11 +1449,11 @@ class YCSBExecutor:
     ending_qps = _INCREMENTAL_TARGET_QPS.value
     ending_length = FLAGS.ycsb_timelimit
     ending_threadcount = int(FLAGS.ycsb_threads_per_client[0])
-    incremental_targets = self._GetIncrementalQpsTargets(ending_qps)
+    incremental_targets = self.GetIncrementalQpsTargets(ending_qps)
     logging.info('Incremental targets: %s', incremental_targets)
 
     # Warm-up phase is shorter and doesn't need results parsing
-    FLAGS['ycsb_timelimit'].parse(_INCREMENTAL_TIMELIMIT_SEC)
+    FLAGS['ycsb_timelimit'].parse(INCREMENTAL_TIMELIMIT_SEC)
     for target in incremental_targets:
       target /= len(vms)
       run_params['target'] = int(target)
@@ -1563,13 +1585,6 @@ class YCSBExecutor:
       A list of samples from the YCSB test at the specified CPU utilization.
     """
 
-    def _ExtractThroughput(samples: list[sample.Sample]) -> float:
-      """Gets the throughput recorded in the samples."""
-      for result in samples:
-        if result.metric == 'overall Throughput':
-          return result.value
-      return 0.0
-
     def _GetReadAndUpdateProportion(workload: str) -> tuple[float, float]:
       """Gets the starting throughput to start the test with."""
       with open(workload) as f:
@@ -1611,7 +1626,9 @@ class YCSBExecutor:
           )
         target_qps = int((upper_bound + lower_bound) / 2)
         run_samples = _ExecuteWorkload(target_qps)
-        measured_qps = _ExtractThroughput(run_samples)
+        run_p50_stats = ycsb_stats.ExtractStats(run_samples, 'p50')
+        run_p99_stats = ycsb_stats.ExtractStats(run_samples, 'p99')
+        measured_qps = run_p50_stats.throughput
         end_timestamp = datetime.datetime.fromtimestamp(
             run_samples[0].timestamp, tz=datetime.timezone.utc
         )
@@ -1627,10 +1644,11 @@ class YCSBExecutor:
             )
         )
         logging.info(
-            'Run had throughput target %s and measured throughput %s, with CPU'
-            ' utilization %s.',
+            'Run had throughput target %s and measured stats \n %s \n %s, '
+            'with CPU utilization %s.',
             target_qps,
-            measured_qps,
+            run_p50_stats,
+            run_p99_stats,
             cpu_utilization,
         )
         if cpu_utilization < CPU_OPTIMIZATION_TARGET_MIN.value:

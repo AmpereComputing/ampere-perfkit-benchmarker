@@ -40,12 +40,26 @@ from perfkitbenchmarker import flag_util
 from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker.linux_packages import pgbench
 
+# Postgresql protocol options
+SIMPLE = 'simple'
+EXTENDED = 'extended'
+PREPARED = 'prepared'
+
 flags.DEFINE_integer(
     'pgbench_scale_factor',
     1,
     'scale factor used to fill the database',
     lower_bound=1,
 )
+
+flags.DEFINE_enum(
+    'pgbench_protocol',
+    None,
+    [SIMPLE, EXTENDED, PREPARED],
+    'Protocol to use for pgbench. See'
+    ' https://www.postgresql.org/docs/current/protocol-flow.html',
+)
+
 flags.DEFINE_integer(
     'pgbench_seconds_per_test',
     10,
@@ -106,7 +120,7 @@ pgbench:
         #Valid storage sizes range from minimum of 128000 MB and additional increments of 128000 MB up to maximum of 1024000 MB.
         disk_size: 128
     vm_groups:
-      clients:
+      servers:
         vm_spec:
           GCP:
             machine_type: n1-standard-16
@@ -118,7 +132,7 @@ pgbench:
             machine_type: Standard_A4m_v2
             zone: eastus
         disk_spec: *default_500_gb
-      servers:
+      clients:
         vm_spec:
           GCP:
             machine_type: n1-standard-16
@@ -167,6 +181,7 @@ def UpdateBenchmarkSpecWithRunStageFlags(benchmark_spec):
   benchmark_spec.seconds_to_pause = FLAGS.pgbench_seconds_to_pause_before_steps
   benchmark_spec.client_counts = FLAGS.pgbench_client_counts
   benchmark_spec.job_counts = FLAGS.pgbench_job_counts
+  benchmark_spec.pgbench_protocol = FLAGS.pgbench_protocol
 
 
 def GetDbSize(relational_db, db_name):
@@ -194,8 +209,10 @@ def Prepare(benchmark_spec):
     benchmark_spec: benchmark_spec object which contains the database server and
       client_vm
   """
-  vm = benchmark_spec.vms[0]
-  vm.Install('pgbench')
+  client_vms = benchmark_spec.vm_groups['clients']
+  assert len(client_vms) == 1
+  client_vm = client_vms[0]
+  client_vm.Install('pgbench')
 
   UpdateBenchmarkSpecWithPrepareStageFlags(benchmark_spec)
 
@@ -235,7 +252,7 @@ def Prepare(benchmark_spec):
                 filler varchar(84)  NULL \\
             ); \\
             RUN BATCH;\"""")
-    vm.RobustRemoteCommand(
+    client_vm.RobustRemoteCommand(
         f"""pgbench "host=/tmp port=5432 dbname={TEST_DB_NAME} \\
         options='-c spanner.force_autocommit=on -c \\
         spanner.copy_max_parallelism=200 -c spanner.autocommit_dml_mode=\\'partitioned_non_atomic\\''" \\
@@ -243,7 +260,7 @@ def Prepare(benchmark_spec):
         --scale={benchmark_spec.scale_factor}"""
     )
   else:
-    vm.RobustRemoteCommand(
+    client_vm.RobustRemoteCommand(
         f'pgbench {connection_string} -i -s {benchmark_spec.scale_factor}'
     )
 
@@ -356,6 +373,7 @@ def Run(benchmark_spec):
       benchmark_spec.job_counts,
       benchmark_spec.seconds_to_pause,
       benchmark_spec.seconds_per_test,
+      benchmark_spec.pgbench_protocol,
       common_metadata,
   )
   return []
@@ -375,5 +393,7 @@ def GetMetaData(db_size, benchmark_spec):
 
 def Cleanup(benchmark_spec):
   """Uninstalls pgbench from the client vm."""
-  vm = benchmark_spec.vms[0]
-  vm.Uninstall('pgbench')
+  client_vms = benchmark_spec.vm_groups['clients']
+  assert len(client_vms) == 1
+  client_vm = client_vms[0]
+  client_vm.Uninstall('pgbench')

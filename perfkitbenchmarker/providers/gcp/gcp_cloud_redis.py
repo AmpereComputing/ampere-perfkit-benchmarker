@@ -54,14 +54,14 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
     self.project = FLAGS.project
     self.size = gcp_flags.REDIS_GB.value
     self.node_type = ''
-    self.redis_region = FLAGS.cloud_redis_region
+    self.redis_region = managed_memory_store.REGION.value
     self.zone_distribution = gcp_flags.REDIS_ZONE_DISTRIBUTION.value
-    if self._clustered:
+    if self.clustered:
       self.size = self.node_count * _SHARD_SIZE_GB
       self.node_type = gcp_flags.REDIS_NODE_TYPE.value
       if self.zone_distribution == 'single-zone':
         self.zones = [FLAGS.zone[0]]
-    self.redis_version = spec.version or _DEFAULT_VERSION
+    self.version = spec.version or _DEFAULT_VERSION
     self.tier = self._GetTier()
     self.network = (
         'default'
@@ -81,7 +81,7 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
   def _GetTier(self) -> str | None:
     """Returns the tier of the instance."""
     # See https://cloud.google.com/memorystore/docs/redis/redis-tiers."""
-    if self._clustered:
+    if self.clustered:
       return None
     if self.failover_style == managed_memory_store.Failover.FAILOVER_NONE:
       return BASIC_TIER
@@ -89,18 +89,12 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
 
   def CheckPrerequisites(self):
     if (
-        FLAGS.redis_failover_style
+        managed_memory_store.FAILOVER_STYLE.value
         == managed_memory_store.Failover.FAILOVER_SAME_ZONE
     ):
       raise errors.Config.InvalidValue(
           'GCP cloud redis does not support same zone failover'
       )
-    if (
-        FLAGS.managed_memory_store_version
-        and FLAGS.managed_memory_store_version
-        not in managed_memory_store.REDIS_VERSIONS
-    ):
-      raise errors.Config.InvalidValue('Invalid Redis version.')
 
   def GetResourceMetadata(self) -> dict[str, Any]:
     """Returns a dict containing metadata about the instance.
@@ -112,9 +106,9 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
         'cloud_redis_failover_style': self.failover_style,
         'cloud_redis_size': self.size,
         'cloud_redis_region': self.redis_region,
-        'cloud_redis_version': self.ParseReadableVersion(self.redis_version),
+        'cloud_redis_version': self.GetReadableVersion(),
     })
-    if self._clustered:
+    if self.clustered:
       self.metadata['cloud_redis_node_type'] = self.node_type
       self.metadata['cloud_redis_zone_distribution'] = self.zone_distribution
     else:
@@ -123,19 +117,18 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
       self.metadata['cloud_redis_tier'] = self.tier
     return self.metadata
 
-  @staticmethod
-  def ParseReadableVersion(version):
+  def GetReadableVersion(self):
     """Parses Redis major and minor version number."""
-    if version.count('_') < 2:
+    if self.version.count('_') < 2:
       logging.info(
           (
               'Could not parse version string correctly, '
               'full Redis version returned: %s'
           ),
-          version,
+          self.version,
       )
-      return version
-    return '.'.join(version.split('_')[1:])
+      return self.version
+    return '.'.join(self.version.split('_')[1:])
 
   def _CreateServiceConnectionPolicy(self) -> None:
     """Creates a service connection policy for the VPC."""
@@ -180,15 +173,18 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
     cmd.flags['network'] = self.network
     cmd.flags['tier'] = self.tier
     cmd.flags['size'] = self.size
-    cmd.flags['redis-version'] = self.redis_version
+    cmd.flags['redis-version'] = self.version
     cmd.flags['labels'] = util.MakeFormattedDefaultTags()
     return cmd
+
+  def _CreateDependencies(self):
+    if self.clustered:
+      self._CreateServiceConnectionPolicy()
 
   def _Create(self):
     """Creates the instance."""
     cmd = self._GetCreateCommand()
-    if self._clustered:
-      self._CreateServiceConnectionPolicy()
+    if self.clustered:
       cmd = self._GetClusterCreateCommand()
     cmd.flags['region'] = self.redis_region
     cmd.Issue(timeout=COMMAND_TIMEOUT)
@@ -196,14 +192,14 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
   def _IsReady(self):
     """Returns whether cluster is ready."""
     instance_details, _, _ = self.DescribeInstance()
-    if self._clustered:
+    if self.clustered:
       return json.loads(instance_details).get('state') == 'ACTIVE'
     return json.loads(instance_details).get('state') == 'READY'
 
   def _Delete(self):
     """Deletes the instance."""
     cmd = util.GcloudCommand(self, 'redis', 'instances', 'delete', self.name)
-    if self._clustered:
+    if self.clustered:
       cmd = util.GcloudCommand(self, 'redis', 'clusters', 'delete', self.name)
     cmd.flags['region'] = self.redis_region
     cmd.Issue(timeout=COMMAND_TIMEOUT, raise_on_failure=False)
@@ -220,7 +216,7 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
       stdout, stderr, and retcode.
     """
     cmd = util.GcloudCommand(self, 'redis', 'instances', 'describe', self.name)
-    if self._clustered:
+    if self.clustered:
       cmd = util.GcloudCommand(self, 'redis', 'clusters', 'describe', self.name)
     cmd.flags['region'] = self.redis_region
     stdout, stderr, retcode = cmd.Issue(raise_on_failure=False)
@@ -241,7 +237,7 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
       raise errors.Resource.RetryableGetError(
           'Failed to retrieve information on {}'.format(self.name)
       )
-    if self._clustered:
+    if self.clustered:
       self._ip = json.loads(stdout)['discoveryEndpoints'][0]['address']
       self._port = 6379
       return

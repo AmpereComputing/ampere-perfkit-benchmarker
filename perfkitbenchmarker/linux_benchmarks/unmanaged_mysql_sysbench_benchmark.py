@@ -38,18 +38,6 @@ BENCHMARK_CONFIG = """
 unmanaged_mysql_sysbench:
   description: Mysql on a VM benchmarked using Sysbench.
   vm_groups:
-    client:
-      os_type: centos_stream9
-      vm_spec:
-        GCP:
-          machine_type: c3-standard-22
-          zone: us-east1-b
-        AWS:
-          machine_type: m7i.4xlarge
-          zone: us-east-1a
-        Azure:
-          machine_type: Standard_D16s_v5
-          zone: eastus
     server:
       os_type: centos_stream9
       vm_spec:
@@ -81,6 +69,18 @@ unmanaged_mysql_sysbench:
           provisioned_iops: 40000
           provisioned_throughput: 800
           num_striped_disks: 2
+    client:
+      os_type: centos_stream9
+      vm_spec:
+        GCP:
+          machine_type: c3-standard-22
+          zone: us-east1-b
+        AWS:
+          machine_type: m7i.4xlarge
+          zone: us-east-1a
+        Azure:
+          machine_type: Standard_D16s_v5
+          zone: eastus
   flags:
     sysbench_version: df89d34c410a2277e19f77e47e535d0890b2029b
     disk_fs_type: xfs
@@ -88,8 +88,7 @@ unmanaged_mysql_sysbench:
     db_engine: mysql
     sysbench_report_interval: 1
     sysbench_ssl_mode: required
-    db_high_availability: True
-    sysbench_run_threads: 64,128,256,512,1024,2048
+    sysbench_run_threads: 1,64,128,256,512,1024,2048
     sysbench_run_seconds: 300
 """
 
@@ -263,6 +262,8 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> list[sample.Sample]:
   sysbench_parameters = _GetSysbenchParameters(
       primary_server.internal_ip, _GetPassword())
   results = []
+  # a map of trasactions metric name to current sample with max value
+  max_transactions = {}
   for thread_count in FLAGS.sysbench_run_threads:
     sysbench_parameters.threads = thread_count
     cmd = sysbench.BuildRunCommand(sysbench_parameters)
@@ -279,7 +280,23 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> list[sample.Sample]:
     })
     results += sysbench.ParseSysbenchTimeSeries(stdout, metadata)
     results += sysbench.ParseSysbenchLatency([stdout], metadata)
-    results += sysbench.ParseSysbenchTransactions(stdout, metadata)
+    current_transactions = sysbench.ParseSysbenchTransactions(stdout, metadata)
+    results += current_transactions
+    for item in current_transactions:
+      metric = item.metric
+      metric_value = item.value
+      current_max_sample = max_transactions.get(metric, None)
+      if not current_max_sample or current_max_sample.value < metric_value:
+        max_transactions[metric] = item
+  # find the max tps/qps amongst all thread counts and report as a new metric.
+  for item in max_transactions.values():
+    metadata = copy.deepcopy(item.metadata)
+    metadata['searched_thread_counts'] = FLAGS.sysbench_run_threads
+    results.append(
+        sample.Sample(
+            'max_' + item.metric, item.value, item.unit, metadata=metadata
+        )
+    )
   return results
 
 

@@ -35,7 +35,7 @@ from tests import pkb_common_test_case
 FLAGS = flgs.FLAGS
 
 _COMPONENT = 'test_component'
-_RUN_URI = 'fake-urn-uri'
+_RUN_URI = 'abc9876'
 _NVIDIA_DRIVER_SETUP_DAEMON_SET_SCRIPT = 'https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml'
 _NVIDIA_UNRESTRICTED_PERMISSIONS_DAEMON_SET = (
     'nvidia_unrestricted_permissions_daemonset.yml'
@@ -97,6 +97,55 @@ def patch_critical_objects(stdout='', stderr='', return_code=0, flags=FLAGS):
         mock.patch(vm_util.__name__ + '.IssueCommand', return_value=retval)
     )
     yield issue_command
+
+
+class GoogleContainerRegistryTestCase(pkb_common_test_case.PkbCommonTestCase):
+
+  class FakeContainerImage(container_service.ContainerImage):
+
+    def __init__(self, name):
+      self.name = name
+      self.directory = f'docker/{name}/Dockerfile'
+
+  def setUp(self):
+    super().setUp()
+    self.enter_context(
+        mock.patch.object(
+            google_kubernetes_engine.container_service,
+            'ContainerImage',
+            self.FakeContainerImage,
+        )
+    )
+
+  def testFullRegistryTag(self):
+    spec = container_spec.ContainerRegistrySpec(
+        'NAME',
+        **{
+            'cloud': 'GCP',
+        },
+    )
+    spec.zone = 'us-west-1a'
+    with patch_critical_objects():
+      registry = google_kubernetes_engine.GoogleArtifactRegistry(spec)
+      image = registry.GetFullRegistryTag('fakeimage')
+    self.assertEqual(
+        image,
+        'us-west-docker.pkg.dev/test_project/pkbabc9876/fakeimage'
+    )
+
+  def testRemoteBuildCreateSucceeds(self):
+    spec = container_spec.ContainerRegistrySpec(
+        'NAME',
+        **{
+            'cloud': 'GCP',
+        },
+    )
+    spec.zone = 'us-west-1a'
+    registry = google_kubernetes_engine.GoogleArtifactRegistry(spec)
+    self.enter_context(
+        mock.patch.object(util.GcloudCommand, 'Issue', return_value=('', '', 0))
+    )
+    registry._Build('fakeimage')
 
 
 class GoogleKubernetesEngineCustomMachineTypeTestCase(
@@ -234,7 +283,7 @@ class GoogleKubernetesEngineTestCase(pkb_common_test_case.PkbCommonTestCase):
       cluster._Delete()
       command_string = ' '.join(issue_command.call_args[0][0])
 
-      self.assertEqual(issue_command.call_count, 3)
+      self.assertEqual(issue_command.call_count, 4)
       self.assertIn(
           'gcloud container clusters delete pkb-{}'.format(_RUN_URI),
           command_string,
@@ -625,7 +674,7 @@ class GoogleKubernetesEngineRegionalTestCase(
           ['gcloud', 'container', 'node-pools', 'create', 'nodepool1'],
       )
       self.assertContainsSubsequence(
-          create_nodepool1, ['--cluster', 'pkb-fake-urn-uri']
+          create_nodepool1, ['--cluster', 'pkb-abc9876']
       )
       self.assertContainsSubsequence(
           create_nodepool1, ['--machine-type', 'machine-type-1']
@@ -671,7 +720,7 @@ class GoogleKubernetesEngineRegionalTestCase(
           ['gcloud', 'container', 'node-pools', 'create', 'nodepool1'],
       )
       self.assertContainsSubsequence(
-          create_nodepool1, ['--cluster', 'pkb-fake-urn-uri']
+          create_nodepool1, ['--cluster', 'pkb-abc9876']
       )
       self.assertContainsSubsequence(
           create_nodepool1, ['--node-labels', 'pkb_nodepool=nodepool1']

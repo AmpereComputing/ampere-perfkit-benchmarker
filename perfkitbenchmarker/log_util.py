@@ -16,6 +16,7 @@
 from contextlib import contextmanager
 import datetime
 import logging
+from logging import handlers
 import sys
 import threading
 from absl import flags
@@ -40,17 +41,44 @@ LOG_LEVELS = {
 
 # Paths for log writing and exporting.
 log_local_path = None
-log_cloud_path = None
 LOG_FILE_NAME = 'pkb.log'
 
+GSUTIL_MV = 'mv'
+GSUTIL_CP = 'cp'
+GSUTIL_OPERATIONS = [GSUTIL_MV, GSUTIL_CP]
 
-_PKB_LOG_BUCKET = flags.DEFINE_string(
+DEFAULT_LOG_ROTATING_INTERVAL = 1
+DEFAULT_LOG_ROTATING_UNIT = 'D'
+DEFAULT_LOG_ROTATING_BACKUP_COUNT = 5
+
+
+PKB_LOG_BUCKET = flags.DEFINE_string(
     'pkb_log_bucket',
     None,
     'Name of the GCS bucket that PKB logs should route to. If this is not '
     'specified, then PKB logs will remain on the VM. This bucket must exist '
     'and the caller must have write permissions on the bucket for a successful '
     'export.',
+)
+VM_LOG_BUCKET = flags.DEFINE_string(
+    'vm_log_bucket',
+    None,
+    'The GCS bucket to store VM logs in. If not provided, VM logs will go to '
+    'the calling machine only. This only applies if --capture_vm_logs is '
+    'set.',
+)
+_SAVE_LOG_TO_BUCKET_OPERATION = flags.DEFINE_enum(
+    'save_log_to_bucket_operation',
+    GSUTIL_MV,
+    GSUTIL_OPERATIONS,
+    'How to save the log to the bucket, available options are mv, cp',
+)
+_RELATIVE_GCS_LOG_PATH = flags.DEFINE_string(
+    'relative_gcs_log_path',
+    None,
+    'The relative path inside the GCS bucket where to save the log, e.g. '
+    '"root_dir/sub_dir", and the full file path would be '
+    'gs://<bucket>/<relative_gcs_log_path>',
 )
 flags.DEFINE_enum(
     'log_level',
@@ -176,16 +204,6 @@ def ConfigureLogging(
   global log_local_path
   log_local_path = log_path
 
-  # Set the GCS destination path global variable so it can be used by PKB.
-  global log_cloud_path
-  run_date = datetime.date.today()
-  log_cloud_path = (
-      f'gs://{_PKB_LOG_BUCKET.value}/'
-      + f'{run_date.year:04d}/{run_date.month:02d}/'
-      + f'{run_date.day:02d}/'
-      + f'{run_uri}-{LOG_FILE_NAME}'
-  )
-
   # Build the format strings for the stderr and log file message formatters.
   stderr_format = (
       '%(asctime)s {} %(threadName)s %(pkb_label)s%(levelname)-8s %(message)s'
@@ -225,7 +243,12 @@ def ConfigureLogging(
 
   # Add handler for output to log file.
   logging.info('Verbose logging to: %s', log_local_path)
-  handler = logging.FileHandler(filename=log_local_path)
+  handler = handlers.TimedRotatingFileHandler(
+      filename=log_local_path,
+      when=DEFAULT_LOG_ROTATING_UNIT,
+      interval=DEFAULT_LOG_ROTATING_INTERVAL,
+      backupCount=DEFAULT_LOG_ROTATING_BACKUP_COUNT,
+  )
   handler.addFilter(PkbLogFilter())
   handler.setLevel(file_log_level)
   handler.setFormatter(logging.Formatter(file_format))
@@ -233,15 +256,80 @@ def ConfigureLogging(
   logging.getLogger('requests').setLevel(logging.ERROR)
 
 
-def CollectPKBLogs() -> None:
-  """Move PKB log files over to a GCS bucket (`pkb_log_bucket` flag)."""
-  if _PKB_LOG_BUCKET.value:
+def CollectPKBLogs(run_uri: str) -> None:
+  """Move PKB log files over to a GCS bucket (`pkb_log_bucket` flag).
+
+  Args:
+    run_uri: The run URI of the benchmark run.
+  """
+  if PKB_LOG_BUCKET.value:
+    # Generate the log path to the cloud bucket based on the invocation date of
+    # this function.
+    gcs_log_path = GetLogCloudPath(PKB_LOG_BUCKET.value, f'{run_uri}-pkb.log')
+    vm_util.IssueRetryableCommand([
+        'gsutil',
+        '-h',
+        'Content-Type:text/plain',
+        _SAVE_LOG_TO_BUCKET_OPERATION.value,
+        '-Z',
+        log_local_path,
+        gcs_log_path,
+    ])
+
+
+def CollectVMLogs(run_uri: str, source_path: str) -> None:
+  """Move VM log files over to a GCS bucket (`vm_log_bucket` flag).
+
+  Args:
+    run_uri: The run URI of the benchmark run.
+    source_path: The path to the log file.
+  """
+  if VM_LOG_BUCKET.value:
+    source_filename = source_path.split('/')[-1]
+    gcs_directory_path = GetLogCloudPath(VM_LOG_BUCKET.value, run_uri)
+    gcs_path = f'{gcs_directory_path}/{source_filename}'
     vm_util.IssueRetryableCommand([
         'gsutil',
         '-h',
         'Content-Type:text/plain',
         'mv',
         '-Z',
-        log_local_path,
-        log_cloud_path,
+        source_path,
+        gcs_path,
     ])
+
+
+def GetLogCloudPath(log_bucket: str, path_suffix: str) -> str:
+  """Returns the GCS path, to where the logs should be saved.
+
+  Args:
+    log_bucket: The GCS bucket to save the logs to.
+    path_suffix: The suffix to append to the GCS path.
+
+  Returns:
+    The GCS path to where the logs should be saved.
+  """
+  run_date = datetime.date.today()
+  gcs_path_prefix = _GetGcsPathPrefix(log_bucket)
+  return (
+      f'{gcs_path_prefix}/'
+      + f'{run_date.year:04d}/{run_date.month:02d}/'
+      + f'{run_date.day:02d}/'
+      + path_suffix
+  )
+
+
+def _GetGcsPathPrefix(bucket: str) -> str:
+  """Returns the GCS path prefix, to where the logs should be saved.
+
+  Args:
+    bucket: The GCS bucket to save the logs to.
+
+  Returns:
+    The GCS path prefix, to where the logs should be saved. If
+    `relative_gcs_log_path` is specified, the prefix will be
+    gs://<bucket>/<relative_gcs_log_path>. Otherwise, it will be gs://<bucket>.
+  """
+  if _RELATIVE_GCS_LOG_PATH.value:
+    return f'gs://{bucket}/{_RELATIVE_GCS_LOG_PATH.value}'
+  return f'gs://{bucket}'

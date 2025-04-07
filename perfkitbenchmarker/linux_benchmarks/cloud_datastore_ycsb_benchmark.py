@@ -35,6 +35,8 @@ from google.cloud import datastore
 from google.oauth2 import service_account
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import configs
+from perfkitbenchmarker import errors
+from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import ycsb
 
@@ -51,7 +53,11 @@ cloud_datastore_ycsb:
       vm_spec: *default_single_core
       vm_count: 1
   flags:
-    openjdk_version: 8"""
+    openjdk_version: 11
+    gcloud_scopes: >
+      trace
+      datastore
+      cloud-platform"""
 
 # the name of the database entity created when running datastore YCSB
 # https://github.com/brianfrankcooper/YCSB/tree/master/googledatastore
@@ -65,42 +71,39 @@ _CLEANUP_KIND_DELETE_PER_THREAD_BATCH_SIZE = 3000
 _CLEANUP_KIND_DELETE_OP_BATCH_SIZE = 500
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string(
+_KEYFILE = flags.DEFINE_string(
     'google_datastore_keyfile',
     None,
-    'The path to Google API P12 private key file',
+    'The path to Google API JSON private key file',
 )
-flags.DEFINE_string(
-    'private_keyfile',
-    '/tmp/key.p12',
-    'The path where the private key file is copied to on a VM.',
-)
-flags.DEFINE_string(
-    'google_datastore_serviceAccount',
-    None,
-    'The service account email associated withdatastore private key file',
-)
-flags.DEFINE_string(
-    'google_datastore_datasetId',
+_PROJECT_ID = flags.DEFINE_string(
+    'google_datastore_projectId',
     None,
     'The project ID that has Cloud Datastore service',
 )
-flags.DEFINE_string(
+_DATASET_ID = flags.DEFINE_string(
+    'google_datastore_datasetId',
+    None,
+    'The database ID that has Cloud Datastore service',
+)
+_DEBUG = flags.DEFINE_string(
     'google_datastore_debug', 'false', 'The logging level when running YCSB'
 )
-flags.DEFINE_boolean(
+_REPOPULATE = flags.DEFINE_boolean(
     'google_datastore_repopulate',
     False,
     'If True, empty database & repopulate with new data.'
     'By default, tests are run with pre-populated data.',
 )
-# the JSON keyfile is needed to validate credentials when cleaning up the db
-flags.DEFINE_string(
-    'google_datastore_deletion_keyfile',
-    None,
-    'The path to Google API JSON private key file',
+_TARGET_LOAD_QPS = flags.DEFINE_integer(
+    'google_datastore_target_load_qps',
+    500,
+    'The target QPS to load the database at. See'
+    ' https://cloud.google.com/datastore/docs/best-practices#ramping_up_traffic'
+    ' for more info.',
 )
 
+_KEYFILE_LOCAL_PATH = '/tmp/key.json'
 _INSERTION_RETRY_LIMIT = 100
 _SLEEP_AFTER_LOADING_SECS = 30 * 60
 
@@ -113,19 +116,11 @@ def GetConfig(user_config):
 
 
 def CheckPrerequisites(_):
-  """Verifies that the required resources are present.
-
-  Raises:
-    perfkitbenchmarker.data.ResourceNotFound: On missing resource.
-  """
-  # Before YCSB Cloud Datastore supports Application Default Credential,
-  # we should always make sure valid credential flags are set.
-  if not FLAGS.google_datastore_keyfile:
-    raise ValueError('"google_datastore_keyfile" must be set')
-  if not FLAGS.google_datastore_serviceAccount:
-    raise ValueError('"google_datastore_serviceAccount" must be set')
-  if not FLAGS.google_datastore_datasetId:
-    raise ValueError('"google_datastore_datasetId" must be set ')
+  if not ycsb.SKIP_LOAD_STAGE.value and not _TARGET_LOAD_QPS.value:
+    raise errors.Setup.InvalidFlagConfigurationError(
+        '--google_datastore_target_load_qps must be set when loading the'
+        ' database.'
+    )
 
 
 def _Install(vm):
@@ -133,17 +128,70 @@ def _Install(vm):
   vm.Install('ycsb')
 
   # Copy private key file to VM
-  if FLAGS.google_datastore_keyfile.startswith('gs://'):
-    vm.Install('google_cloud_sdk')
-    vm.RemoteCommand(
-        '{cmd} {datastore_keyfile} {private_keyfile}'.format(
-            cmd='gsutil cp',
-            datastore_keyfile=FLAGS.google_datastore_keyfile,
-            private_keyfile=FLAGS.private_keyfile,
-        )
-    )
-  else:
-    vm.RemoteCopy(FLAGS.google_datastore_keyfile, FLAGS.private_keyfile)
+  if _KEYFILE.value:
+    if _KEYFILE.value.startswith('gs://'):
+      vm.Install('google_cloud_sdk')
+      vm.RemoteCommand(f'gsutil cp {_KEYFILE.value} {_KEYFILE_LOCAL_PATH}')
+    else:
+      vm.RemoteCopy(_KEYFILE.value, _KEYFILE_LOCAL_PATH)
+
+
+def _GetCommonYcsbArgs():
+  """Returns common YCSB args."""
+  args = {
+      'googledatastore.projectId': _PROJECT_ID.value,
+      'googledatastore.debug': _DEBUG.value,
+  }
+  # if not provided, use the (default) database.
+  if _DATASET_ID.value:
+    args['googledatastore.datasetId'] = _DATASET_ID.value
+  return args
+
+
+def _GetYcsbExecutor():
+  env = {}
+  if _KEYFILE.value:
+    env = {'GOOGLE_APPLICATION_CREDENTIALS': _KEYFILE_LOCAL_PATH}
+  return ycsb.YCSBExecutor('googledatastore', environment=env)
+
+
+def RampUpLoad(
+    ycsb_executor: ycsb.YCSBExecutor,
+    vms: list[virtual_machine.VirtualMachine],
+    load_kwargs: dict[str, str] = None,
+) -> None:
+  """Loads YCSB by gradually incrementing target QPS.
+
+  Note that this requires clients to be overprovisioned, as the target QPS
+  for YCSB is generally a "throttling" mechanism where the threads try to send
+  as much QPS as possible and then get throttled. If clients are
+  underprovisioned then it's possible for the run to not hit the desired
+  target, which may be undesired behavior.
+
+  See
+  https://cloud.google.com/datastore/docs/best-practices#ramping_up_traffic
+  for an example of why this is needed.
+
+  Args:
+    ycsb_executor: The YCSB executor to use.
+    vms: The client VMs to generate the load.
+    load_kwargs: Extra run arguments.
+  """
+  target_load_qps = _TARGET_LOAD_QPS.value
+  incremental_targets = ycsb_executor.GetIncrementalQpsTargets(target_load_qps)
+  logging.info('Incremental load stage target QPS: %s', incremental_targets)
+
+  ramp_up_args = load_kwargs.copy()
+  for target in incremental_targets:
+    target /= len(vms)
+    ramp_up_args['target'] = int(target)
+    ramp_up_args['threads'] = min(FLAGS.ycsb_preload_threads, int(target))
+    ramp_up_args['maxexecutiontime'] = ycsb.INCREMENTAL_TIMELIMIT_SEC
+    ycsb_executor.Load(vms, load_kwargs=ramp_up_args)
+
+  target_load_qps /= len(vms)
+  load_kwargs['target'] = int(target_load_qps)
+  ycsb_executor.Load(vms, load_kwargs=load_kwargs)
 
 
 def Prepare(benchmark_spec):
@@ -153,7 +201,7 @@ def Prepare(benchmark_spec):
     benchmark_spec: The benchmark specification. Contains all data that is
       required to run the benchmark.
   """
-  if FLAGS.google_datastore_repopulate:
+  if _REPOPULATE.value:
     EmptyDatabase()
 
   vms = benchmark_spec.vms
@@ -161,16 +209,13 @@ def Prepare(benchmark_spec):
   # Install required packages and copy credential files
   background_tasks.RunThreaded(_Install, vms)
 
-  load_kwargs = {
-      'googledatastore.datasetId': FLAGS.google_datastore_datasetId,
-      'googledatastore.privateKeyFile': FLAGS.private_keyfile,
-      'googledatastore.serviceAccountEmail': (
-          FLAGS.google_datastore_serviceAccount
-      ),
-      'googledatastore.debug': FLAGS.google_datastore_debug,
-      'core_workload_insertion_retry_limit': _INSERTION_RETRY_LIMIT,
-  }
-  ycsb.YCSBExecutor('googledatastore').Load(vms, load_kwargs=load_kwargs)
+  if ycsb.SKIP_LOAD_STAGE.value:
+    return
+
+  load_kwargs = _GetCommonYcsbArgs()
+  load_kwargs['core_workload_insertion_retry_limit'] = _INSERTION_RETRY_LIMIT
+  executor = _GetYcsbExecutor()
+  RampUpLoad(executor, vms, load_kwargs)
 
 
 def Run(benchmark_spec):
@@ -183,22 +228,18 @@ def Run(benchmark_spec):
   Returns:
     A list of sample.Sample instances.
   """
-  if FLAGS.google_datastore_repopulate and not FLAGS.ycsb_skip_run_stage:
+  if _REPOPULATE.value and not FLAGS.ycsb_skip_run_stage:
     logging.info('Sleeping 30 minutes to allow for compaction.')
     time.sleep(_SLEEP_AFTER_LOADING_SECS)
 
-  executor = ycsb.YCSBExecutor('googledatastore')
+  executor = _GetYcsbExecutor()
   vms = benchmark_spec.vms
-  run_kwargs = {
-      'googledatastore.datasetId': FLAGS.google_datastore_datasetId,
-      'googledatastore.privateKeyFile': FLAGS.private_keyfile,
-      'googledatastore.serviceAccountEmail': (
-          FLAGS.google_datastore_serviceAccount
-      ),
-      'googledatastore.debug': FLAGS.google_datastore_debug,
+  run_kwargs = _GetCommonYcsbArgs()
+  run_kwargs.update({
+      'googledatastore.tracingenabled': True,
       'readallfields': True,
       'writeallfields': True,
-  }
+  })
   samples = list(executor.Run(vms, run_kwargs=run_kwargs))
   return samples
 
@@ -209,8 +250,8 @@ def Cleanup(_):
 
 def EmptyDatabase():
   """Deletes all entries in a datastore database."""
-  if FLAGS.google_datastore_deletion_keyfile:
-    dataset_id = FLAGS.google_datastore_datasetId
+  if _KEYFILE.value:
+    dataset_id = _DATASET_ID.value
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=_CLEANUP_THREAD_POOL_WORKERS
     )
@@ -238,18 +279,21 @@ def EmptyDatabase():
 
 def GetDatastoreDeleteCredentials():
   """Returns credentials to datastore db."""
-  if FLAGS.google_datastore_deletion_keyfile.startswith('gs://'):
+  if _KEYFILE.value is not None and _KEYFILE.value.startswith('gs://'):
     # Copy private keyfile to local disk
     cp_cmd = [
         'gsutil',
         'cp',
-        FLAGS.google_datastore_deletion_keyfile,
-        FLAGS.private_keyfile,
+        _KEYFILE.value,
+        _KEYFILE_LOCAL_PATH,
     ]
     vm_util.IssueCommand(cp_cmd)
-    credentials_path = FLAGS.private_keyfile
+    credentials_path = _KEYFILE_LOCAL_PATH
   else:
-    credentials_path = FLAGS.google_datastore_deletion_keyfile
+    credentials_path = _KEYFILE.value
+
+  if credentials_path is None:
+    raise errors.Benchmarks.RunError('Credentials path is None')
 
   credentials = service_account.Credentials.from_service_account_file(
       credentials_path,

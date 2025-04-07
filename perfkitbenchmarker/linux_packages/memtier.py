@@ -40,7 +40,7 @@ from perfkitbenchmarker import vm_util
 import seaborn as sns
 
 GIT_REPO = 'https://github.com/RedisLabs/memtier_benchmark'
-GIT_TAG = '1.4.0'
+GIT_TAG = '2.1.1'
 MEMTIER_DIR = '%s/memtier_benchmark' % linux_packages.INSTALL_DIR
 APT_PACKAGES = (
     'build-essential autoconf automake libpcre3-dev '
@@ -301,20 +301,18 @@ def YumInstall(vm):
   """Installs the memtier package on the VM."""
   vm.Install('build_tools')
   vm.InstallPackages(YUM_PACKAGES)
-
-  vm.RemoteCommand('git clone {} {}'.format(GIT_REPO, MEMTIER_DIR))
-  vm.RemoteCommand('cd {} && git checkout {}'.format(MEMTIER_DIR, GIT_TAG))
-  pkg_config = 'PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}'
-  vm.RemoteCommand(
-      'cd {} && autoreconf -ivf && {} ./configure && '
-      'sudo make install'.format(MEMTIER_DIR, pkg_config)
-  )
+  _Install(vm)
 
 
 def AptInstall(vm):
   """Installs the memtier package on the VM."""
   vm.Install('build_tools')
   vm.InstallPackages(APT_PACKAGES)
+  _Install(vm)
+
+
+def _Install(vm):
+  """Installs the memtier package on the VM."""
   vm.RemoteCommand('git clone {} {}'.format(GIT_REPO, MEMTIER_DIR))
   vm.RemoteCommand('cd {} && git checkout {}'.format(MEMTIER_DIR, GIT_TAG))
   if MEMTIER_LARGE_CLUSTER.value:
@@ -325,26 +323,18 @@ def AptInstall(vm):
     vm.RemoteCommand(
         f'tar -C {MEMTIER_DIR} -xvzf {MEMTIER_DIR}/{_LARGE_CLUSTER_TAR}'
     )
+  # autoreconf is segfaulting on some runs. so retry.
+  vm_util.Retry(max_retries=10)(vm.RemoteCommand)(
+      f'cd {MEMTIER_DIR} && autoreconf -ifvvvvvvvvv'
+  )
   vm.RemoteCommand(
-      'cd {} && autoreconf -ivf && ./configure && sudo make install'.format(
-          MEMTIER_DIR
-      )
+      f'cd {MEMTIER_DIR} && ./configure && make && sudo make install'
   )
 
 
-def _Uninstall(vm):
+def Uninstall(vm):
   """Uninstalls the memtier package on the VM."""
   vm.RemoteCommand('cd {} && sudo make uninstall'.format(MEMTIER_DIR))
-
-
-def YumUninstall(vm):
-  """Uninstalls the memtier package on the VM."""
-  _Uninstall(vm)
-
-
-def AptUninstall(vm):
-  """Uninstalls the memtier package on the VM."""
-  _Uninstall(vm)
 
 
 def BuildMemtierCommand(
@@ -363,6 +353,7 @@ def BuildMemtierCommand(
     requests: Union[str, int] | None = None,
     run_count: int | None = None,
     random_data: bool | None = None,
+    distinct_client_seed: bool | None = None,
     test_time: int | None = None,
     outfile: pathlib.PosixPath | None = None,
     password: str | None = None,
@@ -403,6 +394,7 @@ def BuildMemtierCommand(
   # Arguments passed without a parameter
   no_param_args = {
       'random-data': random_data,
+      'distinct-client-seed': distinct_client_seed,
       'cluster-mode': cluster_mode,
       'tls': tls,
       # Don't skip certificate verification by default. keydb_memtier_benchmark
@@ -1170,6 +1162,7 @@ def _Run(
       key_minimum=1,
       key_maximum=MEMTIER_KEY_MAXIMUM.value,
       random_data=True,
+      distinct_client_seed=True,
       test_time=test_time,
       requests=requests,
       password=password,

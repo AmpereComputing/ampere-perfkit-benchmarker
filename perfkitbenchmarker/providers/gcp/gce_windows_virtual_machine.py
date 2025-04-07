@@ -48,6 +48,9 @@ echo MSSQLSERVER is now running!
 sqlcmd.exe -Q "CREATE LOGIN [%COMPUTERNAME%\\perfkit] from windows;"
 sqlcmd.exe -Q "ALTER SERVER ROLE [sysadmin] ADD MEMBER [%COMPUTERNAME%\\perfkit]"
 """
+UPDATE_NETWORK_DRIVERS = """
+googet -noconfirm update
+"""
 
 
 class GceUnexpectedWindowsAdapterOutputError(Exception):
@@ -68,9 +71,11 @@ class WindowsGceVirtualMachine(
       os_types.WINDOWS2016_CORE: 'windows-2016-core',
       os_types.WINDOWS2019_CORE: 'windows-2019-core',
       os_types.WINDOWS2022_CORE: 'windows-2022-core',
+      os_types.WINDOWS2025_CORE: 'windows-2025-core',
       os_types.WINDOWS2016_DESKTOP: 'windows-2016',
       os_types.WINDOWS2019_DESKTOP: 'windows-2019',
       os_types.WINDOWS2022_DESKTOP: 'windows-2022',
+      os_types.WINDOWS2025_DESKTOP: 'windows-2025',
   }
 
   GVNIC_DISABLED_OS_TYPES = []
@@ -86,7 +91,7 @@ class WindowsGceVirtualMachine(
     """
     super().__init__(vm_spec)
     self.boot_metadata['windows-startup-script-ps1'] = (
-        windows_virtual_machine.STARTUP_SCRIPT
+        windows_virtual_machine.STARTUP_SCRIPT + UPDATE_NETWORK_DRIVERS
     )
 
   def DownloadPreprovisionedData(
@@ -222,7 +227,7 @@ class WindowsGceVirtualMachine(
 
   def SetupLMNotification(self):
     """Prepare environment for /scripts/gce_maintenance_notify.py script."""
-    self.Install('pip')
+    self.Install('python')
     self.RemoteCommand('pip install requests')
     self.PushDataFile(
         self._LM_NOTICE_SCRIPT, f'{self.temp_dir}\\{self._LM_NOTICE_SCRIPT}'
@@ -272,8 +277,12 @@ class WindowsGceSqlServerVirtualMachine(WindowsGceVirtualMachine):
       os_types.WINDOWS2019_SQLSERVER_2019_ENTERPRISE: 'sql-ent-2019-win-2019',
       os_types.WINDOWS2022_SQLSERVER_2019_STANDARD: 'sql-std-2019-win-2022',
       os_types.WINDOWS2022_SQLSERVER_2019_ENTERPRISE: 'sql-ent-2019-win-2022',
-      os_types.WINDOWS2022_SQLSERVER_2022_ENTERPRISE: 'sql-ent-2022-win-2022',
       os_types.WINDOWS2022_SQLSERVER_2022_STANDARD: 'sql-std-2022-win-2022',
+      os_types.WINDOWS2022_SQLSERVER_2022_ENTERPRISE: 'sql-ent-2022-win-2022',
+      os_types.WINDOWS2025_SQLSERVER_2019_STANDARD: 'sql-std-2019-win-2025',
+      os_types.WINDOWS2025_SQLSERVER_2019_ENTERPRISE: 'sql-ent-2019-win-2025',
+      os_types.WINDOWS2025_SQLSERVER_2022_STANDARD: 'sql-std-2022-win-2025',
+      os_types.WINDOWS2025_SQLSERVER_2022_ENTERPRISE: 'sql-ent-2022-win-2025',
   }
 
   OS_TYPE = os_types.WINDOWS_SQLSERVER_OS_TYPES

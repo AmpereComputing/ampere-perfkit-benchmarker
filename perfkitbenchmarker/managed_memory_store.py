@@ -24,6 +24,7 @@ from perfkitbenchmarker import virtual_machine
 # List of memory store types
 REDIS = 'REDIS'
 MEMCACHED = 'MEMCACHED'
+VALKEY = 'VALKEY'
 
 _REDIS_SHARDS_REGEX = r'(?s)slots\n(\d+)\n(\d+).+?port\n(\d+)\nip\n(\S+)'
 
@@ -38,7 +39,7 @@ class Failover:
   FAILOVER_SAME_REGION = 'failover_same_region'
 
 
-_FAILOVER_STYLE = flags.DEFINE_enum(
+FAILOVER_STYLE = flags.DEFINE_enum(
     'redis_failover_style',
     Failover.FAILOVER_NONE,
     [
@@ -60,6 +61,7 @@ REDIS_4_0 = 'redis_4_0'
 REDIS_5_0 = 'redis_5_0'
 REDIS_6_X = 'redis_6_x'
 REDIS_7_0 = 'redis_7_0'
+REDIS_7_1 = 'redis_7_1'
 REDIS_7_2 = 'redis_7_2'
 REDIS_7_X = 'redis_7_x'
 REDIS_VERSIONS = [
@@ -68,10 +70,22 @@ REDIS_VERSIONS = [
     REDIS_5_0,
     REDIS_6_X,
     REDIS_7_0,
+    REDIS_7_1,
     REDIS_7_2,
     REDIS_7_X,
 ]
 
+# List of Valkey versions
+VALKEY_7_2 = 'VALKEY_7_2'
+VALKEY_VERSIONS = [
+    VALKEY_7_2,
+]  # pyformat: disable
+
+flags.DEFINE_string(
+    'managed_memory_store_type',
+    None,
+    'The type of the managed memory store, e.g. Redis, Valkey, etc.',
+)
 flags.DEFINE_string(
     'managed_memory_store_service_type',
     None,
@@ -80,7 +94,7 @@ flags.DEFINE_string(
         ' elasticache, etc.'
     ),
 )
-flags.DEFINE_string(
+MANAGED_MEMORY_STORE_VERSION = flags.DEFINE_string(
     'managed_memory_store_version',
     None,
     (
@@ -110,7 +124,7 @@ _ZONES = flags.DEFINE_list(
     [],
     'The preferred AZs to distribute shards between.',
 )
-flags.DEFINE_string(
+REGION = flags.DEFINE_string(
     'cloud_redis_region',
     None,
     'The region to spin up cloud redis in.',
@@ -145,29 +159,6 @@ def GetManagedMemoryStoreClass(
       SERVICE_TYPE=service_type,
       MEMORY_STORE=memory_store,
   )
-
-
-def ParseReadableVersion(version: str) -> str:
-  """Parses Redis major and minor version number.
-
-  Used for Azure and AWS versions.
-
-  Args:
-    version: String. Version string to get parsed.
-
-  Returns:
-    Parsed version
-  """
-  if version.count('.') < 1:
-    logging.info(
-        (
-            'Could not parse version string correctly,'
-            'full Redis version returned: %s'
-        ),
-        version,
-    )
-    return version
-  return '.'.join(version.split('.', 2)[:2])
 
 
 @dataclasses.dataclass
@@ -208,16 +199,19 @@ class BaseManagedMemoryStore(resource.BaseResource):
     self._port: int = None
     self._password: str = None
 
-    self.failover_style = _FAILOVER_STYLE.value
-    self._clustered: bool = _MANAGED_MEMORY_STORE_CLUSTER.value
+    self.failover_style = FAILOVER_STYLE.value
+    # TODO(liubrandon): Remove `clustered` attr once all Redis resources support
+    # replicas_per_shard.
+    self.clustered: bool = _MANAGED_MEMORY_STORE_CLUSTER.value
     # Shards contain a primary node and its replicas.
-    self.shard_count = _SHARD_COUNT.value if self._clustered else 1
+    self.shard_count = _SHARD_COUNT.value if self.clustered else 1
     self.replicas_per_shard = _REPLICAS_PER_SHARD.value
     self.node_count = self._GetNodeCount()
 
     self.zones = _ZONES.value
-    self.multi_az = self._clustered and len(self.zones) > 1
+    self.multi_az = self.clustered and len(self.zones) > 1
 
+    self.version: str = None
     self.enable_tls = _TLS.value
 
     self._client_vms = None
@@ -229,9 +223,9 @@ class BaseManagedMemoryStore(resource.BaseResource):
         'managed_memory_store_zones': self.zones,
     })
     # Consider separating redis and memcached classes.
-    if self.MEMORY_STORE == REDIS:
+    if self.MEMORY_STORE in [REDIS, VALKEY]:
       self.metadata.update({
-          'clustered': self._clustered,
+          'clustered': self.clustered,
           'shard_count': self.shard_count,
           'replicas_per_shard': self.replicas_per_shard,
           'node_count': self.node_count,
@@ -241,7 +235,7 @@ class BaseManagedMemoryStore(resource.BaseResource):
 
   def _GetNodeCount(self) -> int:
     """Returns the number of nodes in the cluster."""
-    if self._clustered:
+    if self.clustered:
       return self.shard_count * (1 + self.replicas_per_shard)
     if self.failover_style == Failover.FAILOVER_NONE:
       return 1
@@ -309,3 +303,22 @@ class BaseManagedMemoryStore(resource.BaseResource):
   def _GetClientVm(self):
     """Conveniently returns the client VM to use for the instance."""
     return self._client_vms[0]
+
+  def GetReadableVersion(self) -> str:
+    """Parses Redis major and minor version number.
+
+    Used for Azure and AWS versions.
+
+    Returns:
+      Parsed version
+    """
+    if self.version.count('.') < 1:
+      logging.info(
+          (
+              'Could not parse version string correctly,'
+              'full Redis version returned: %s'
+          ),
+          self.version,
+      )
+      return self.version
+    return '.'.join(self.version.split('.', 2)[:2])

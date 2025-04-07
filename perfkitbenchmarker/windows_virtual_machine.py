@@ -192,6 +192,15 @@ class BaseWindowsMixin(os_mixin.BaseOsMixin):
 
     return stdout, stderr
 
+  def PartitionDisk(self, dev_name, dev_path, num_partitions, partition_size):
+    raise NotImplementedError()
+
+  def IsDiskFormatted(self, dev_name, num_partitions):
+    raise NotImplementedError()
+
+  def hasStripedDiskDevice(self, dev_name: str) -> bool:
+    raise NotImplementedError()
+
   def RemoteCopy(self, local_path, remote_path='', copy_to=True):
     """Copies a file to or from the VM.
 
@@ -633,6 +642,12 @@ class Windows2022CoreMixin(BaseWindowsMixin):
   OS_TYPE = os_types.WINDOWS2022_CORE
 
 
+class Windows2025CoreMixin(BaseWindowsMixin):
+  """Class holding Windows Server 2025 Server Core VM specifics."""
+
+  OS_TYPE = os_types.WINDOWS2025_CORE
+
+
 class Windows2016DesktopMixin(BaseWindowsMixin):
   """Class holding Windows Server 2016 with Desktop Experience VM specifics."""
 
@@ -649,6 +664,12 @@ class Windows2022DesktopMixin(BaseWindowsMixin):
   """Class holding Windows Server 2019 with Desktop Experience VM specifics."""
 
   OS_TYPE = os_types.WINDOWS2022_DESKTOP
+
+
+class Windows2025DesktopMixin(BaseWindowsMixin):
+  """Class holding Windows Server 2025 with Desktop Experience VM specifics."""
+
+  OS_TYPE = os_types.WINDOWS2025_DESKTOP
 
 
 class Windows2019SQLServer2017Standard(BaseWindowsMixin):
