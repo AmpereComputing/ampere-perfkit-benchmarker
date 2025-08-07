@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,7 +31,7 @@ from perfkitbenchmarker import background_tasks
 from ampere.pkb.common import download_utils
 from ampere.pkb.linux_packages import memtier
 from ampere.pkb.linux_packages import redis_server
-
+from ampere.pkb.common import firewall_handler
 
 BENCHMARK_NAME = "ampere_redis_memtier"
 BENCHMARK_CONFIG = """
@@ -61,7 +61,7 @@ flags.DEFINE_string(
     "If provided, overrides the redis server machine type.",
 )
 flags.DEFINE_bool(
-    f"{BENCHMARK_NAME}_max_throughput_mode",
+    f"{BENCHMARK_NAME}_throughput_mode",
     False,
     "Get the maximum throughput under SLA, "
     "use in conjunction with ampere_redis_memtier_p99_latency_cap.",
@@ -265,6 +265,10 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
     server_vm = bm_spec.vm_groups["servers"][0]
 
     ports = redis_server.GetRedisPorts(server_vm)
+    # Allow traffic on all ports on both client and server
+    for vm in client_vms + [server_vm]:
+        vm.AllowPort(int(ports[0]), int(ports[-1]))
+        firewall_handler.add_port_to_nftables(vm, f"{ports[0]}-{ports[-1]}")
 
     # Verify benchmark setup
     _VerifyBenchmarkSetup(client_vms, ports)
@@ -279,8 +283,8 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
     # Increase number of SSH connections on both client and server to arbitrarily high value
     max_startups_sessions = 500
     all_vms = client_vms + [server_vm]
-    args_increase_sessions = [((vm, max_startups_sessions), {}) for i,vm in enumerate(all_vms)]
-    background_tasks.RunThreaded(_increase_ssh_max_sessions_startups, args_increase_sessions)
+    for vm in all_vms:
+        _increase_ssh_max_sessions_startups(vm, max_startups_sessions)
 
     # Install redis on the 1st machine.
     server_vm.Install(redis_server.PACKAGE_NAME)
@@ -314,19 +318,6 @@ def Run(bm_spec: _BenchmarkSpec) -> List[sample.Sample]:
     # The format (tuple, dict) is required by background_tasks.RunThreaded()
     # for i in range(len(memtier_cores_ports)):
     #  memtier_cores_ports[i] = (memtier_cores_ports[i], {})
-
-    # Allow traffic on all ports on both client and server
-    for vm in client_vms + [server_vm]:
-        vm.AllowPort(int(ports[0]), int(ports[-1]))
-        # Check if firewalld is installed on system by default
-        stdout, stderr = vm.RemoteCommand(
-            "sudo firewall-cmd --version", ignore_failure=True
-        )
-        if not stderr:
-            vm.RemoteCommand(
-                f"sudo firewall-cmd --zone=public --add-port={ports[0]}-{ports[-1]}/tcp --permanent"
-            )
-            vm.RemoteCommand(f"sudo firewall-cmd --reload")
 
     benchmark_metadata = {}
     redis_metadata = redis_server.GetMetadata()
@@ -423,7 +414,7 @@ def Run(bm_spec: _BenchmarkSpec) -> List[sample.Sample]:
             )
         return [agg_sample] + [p99_sample] + [cache_hit_rate_sample] + results
 
-    max_tpt_mode = FLAGS[f"{BENCHMARK_NAME}_max_throughput_mode"].value
+    max_tpt_mode = FLAGS[f"{BENCHMARK_NAME}_throughput_mode"].value
     if max_tpt_mode:
         return RunMemtierMaxTptMode(redis_metadata, benchmark_metadata)
     else:
@@ -434,10 +425,14 @@ def Cleanup(bm_spec: _BenchmarkSpec) -> None:
     # Kill redis-server and clean up
     client_vms = bm_spec.vm_groups["clients"]
     server_vm = bm_spec.vm_groups["servers"][0]
-    server_vm.RemoteCommand("sudo pkill -f redis-server")
+    server_vm.RemoteCommand("sudo pkill -x redis-server")
     server_vm.RemoteCommand(f"sudo rm -rf {download_utils.INSTALL_DIR}")
+    #restore nftables.conf in /etc folder
+    firewall_handler.restore_nftables(server_vm)
     for client in client_vms:
         client.RemoteCommand(f"sudo rm -rf {download_utils.INSTALL_DIR}")
+        #restore nftables.conf in /etc folder
+        firewall_handler.restore_nftables(client)
     del bm_spec
 
 
@@ -495,32 +490,32 @@ def _ParseMaxTptResults(
 ):
     """Create a custom sample for max throughput mode results"""
     max_tpt_sample = sample.Sample(
-        metric="Best Aggregate Ops Throughput",
+        metric="Aggregate Ops Throughput",
         value=best_ops_sample.value,
-        unit="best aggregate ops/s",
+        unit="aggregate ops/s",
         metadata=best_ops_sample.metadata,
     )
 
     pipelines_sample = sample.Sample(
-        metric="Best Memtier Pipelines",
+        metric="Memtier Pipelines",
         value=best_results[0].metadata["memtier_pipeline"],
         unit="memtier_pipelines",
     )
 
     clients_sample = sample.Sample(
-        metric="Best Memtier Clients",
+        metric="Memtier Clients",
         value=best_results[0].metadata["memtier_clients"],
         unit="memtier_clients",
     )
 
     threads_sample = sample.Sample(
-        metric="Best Memtier Threads",
+        metric="Memtier Threads",
         value=best_results[0].metadata["memtier_threads"],
         unit="memtier_threads",
     )
 
     p99_sample = sample.Sample(
-        metric="Worst p99 Latency",
+        metric="p99_latency",
         value=worst_p99_sample.value,
         unit="ms",
         metadata=worst_p99_sample.metadata,
@@ -547,10 +542,8 @@ def _increase_ssh_max_sessions_startups(vm, session_count):
     vm.RemoteCommand(fr'sudo sed -i -e "s/.*MaxStartups.*/MaxStartups {session_count}/" /etc/ssh/sshd_config')
     vm.RemoteCommand(fr'sudo sed -i -e "s/.*MaxSessions.*/MaxSessions {session_count}/" /etc/ssh/sshd_config')
     # Restart sshd either for RHEL-based or Debian-based
-    stdout, stderr = vm.RemoteCommand('sudo systemctl --version', ignore_failure=True)
-    if not stderr:
-        vm.RemoteCommand('sudo systemctl restart sshd')
-    else:
-        vm.RemoteCommand('sudo service ssh restart')
+    stdout, stderr = vm.RemoteCommand('sudo systemctl restart sshd', ignore_failure=True)
+    if stderr:
+        vm.RemoteCommand('sudo service ssh restart', ignore_failure=True)
 
 

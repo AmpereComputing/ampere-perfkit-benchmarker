@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2019 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +17,9 @@
 
 import posixpath
 from absl import flags
+from typing import Any, Dict
+from ampere.pkb.common import download_utils
+
 
 PACKAGE_NAME = "ampere_nginx"
 APT_PACKAGES = (
@@ -28,34 +31,50 @@ APT_PACKAGES = (
 YUM_PACKAGES = (
     "cmake autoconf automake zlib-devel pcre-devel libevent-devel git wget curl"
 )
-DEPLOY_DIR = posixpath.join("/tmp", "nginx")
+INSTALL_DIR = download_utils.INSTALL_DIR
+DEPLOY_DIR = posixpath.join(INSTALL_DIR, "nginx")
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string(f"{PACKAGE_NAME}_version", "1.15.4", "nginx version")
+flags.DEFINE_string(f"{PACKAGE_NAME}_version", "1.23.4", "nginx version")
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_data", None, "Location of HTML file and nginx conf"
 )
 
 flags.DEFINE_string(
-    f"{PACKAGE_NAME}_local_html", "nginx/CF.html", "local test html"
+        f"{PACKAGE_NAME}_html", "https://www.brotli.pro/enable-brotli/servers/nginx/", "test html URL"
 )
 
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_conf",
-    "nginx/nginx.conf.br",
+    None,
     "The path to an Nginx config file that should be applied "
     "to the server instead of the default one.",
 )
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_commit_tag",
     "a71f9312c2deb28875acc7bacfdd5695a111aa53",
-    "git commit hash for nginx to build bginx with brotli compression"
+    "git commit hash for nginx to build nginx with brotli compression"
     " git tag for gzip compression v1.0.0rc",
 )
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_resty_version",
-    "0.10.27",
+    "0.10.26",
     "git version for openresty lua-nginx module",
+)
+flags.DEFINE_string(
+    f"{PACKAGE_NAME}_lua_resty_core_version",
+    "v0.1.28",
+    "git version for lua_resty_core module",
+)
+flags.DEFINE_string(
+    f"{PACKAGE_NAME}_stream_lua_version",
+    "v0.0.14",
+    "git version for stream_lua_resty module",
+)
+flags.DEFINE_string(
+    f"{PACKAGE_NAME}_lua_resty_lrucache_version",
+    "v0.13",
+    "git version for lua-resty-lrucache module",
 )
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_cflags", "-O3 -mcpu=native", "cflags to build nginx"
@@ -90,6 +109,9 @@ def InstallNginx(vm, version):
     commit_hash = FLAGS[f"{PACKAGE_NAME}_commit_tag"].value
     resty_version = FLAGS[f"{PACKAGE_NAME}_resty_version"].value
     resty_tar = f'lua-nginx-module-{resty_version}.tar.gz'
+    lua_resty_core_version = FLAGS[f"{PACKAGE_NAME}_lua_resty_core_version"].value
+    stream_lua_version = FLAGS[f"{PACKAGE_NAME}_stream_lua_version"].value
+    lua_resty_lrucache_version = FLAGS[f"{PACKAGE_NAME}_lua_resty_lrucache_version"].value
     cflags = FLAGS[f"{PACKAGE_NAME}_cflags"].value
     vm.RemoteCommand(
         f"cd {DEPLOY_DIR} && wget http://nginx.org/download/nginx-{version}.tar.gz && "
@@ -122,12 +144,15 @@ def InstallNginx(vm, version):
     )
     vm.RemoteCommand(
         f"cd {DEPLOY_DIR} && git clone https://github.com/openresty/lua-resty-core.git"
+        f" && cd lua-resty-core && git checkout {lua_resty_core_version}"
     )
     vm.RemoteCommand(
         f"cd {DEPLOY_DIR} && git clone https://github.com/openresty/stream-lua-nginx-module.git"
+        f" && cd stream-lua-nginx-module && git checkout {stream_lua_version}"
     )
     vm.RemoteCommand(
         f"cd {DEPLOY_DIR} && git clone https://github.com/openresty/lua-resty-lrucache.git"
+        f" && cd lua-resty-lrucache && git checkout {lua_resty_lrucache_version}"
     )
     vm.RemoteCommand(
         f"cd {DEPLOY_DIR} && git clone https://github.com/openresty/luajit2.git && "
@@ -157,6 +182,14 @@ def InstallNginx(vm, version):
         f"cd {DEPLOY_DIR}/lua-resty-lrucache && sudo make install PREFIX={DEPLOY_DIR} && "
         f"cd {DEPLOY_DIR}/nginx-{version} && make -j{vm.num_cpus} && make install"
     )
+
+def GetMetadata() -> Dict[str, Any]:    
+    return {
+        "nginx_server_version": FLAGS[f"{PACKAGE_NAME}_version"].value,
+        "nginx_lua-nginx-openresty_version": FLAGS[f"{PACKAGE_NAME}_resty_version"].value,
+        "nginx_conf": "BROTLI",
+        "nginx_test_html": FLAGS[f"{PACKAGE_NAME}_html"].value,
+    }
 
 
 def AptInstall(vm):

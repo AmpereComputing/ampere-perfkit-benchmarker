@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,7 +36,7 @@ BENCHMARK_NAME = "ampere_cassandra_tlp"
 
 
 cassandra_latency_capped_throughput = flags.DEFINE_bool(
-    f"{BENCHMARK_NAME}_latency_capped_throughput",
+    f"{BENCHMARK_NAME}_throughput_mode",
     False,
     "Measure latency capped throughput. Use in conjunction with "
     "memtier_latency_cap. Defaults to False. ",
@@ -97,6 +97,9 @@ def Prepare(benchmark_spec):
     total_client_instances = num_clients * client_instances
     server_instances = FLAGS[f"{cassandra.PACKAGE_NAME}_instances"].value
     total_heap_size = FLAGS[f"{cassandra.PACKAGE_NAME}_heap_size"].value
+    if server_instances > 1 and cassandra_latency_capped_throughput.value:
+        raise ValueError(
+                "Throughput Mode can be run for single server client instance.")
     if server_instances == total_client_instances:
         # check heap size based on total server instances
         heap_size, err, _ = cassandra_server_vms.RemoteCommandWithReturnCode(
@@ -208,6 +211,7 @@ def Run(benchmark_spec):
     )
     # SLA works with single cassandra server instance
     if cassandra_latency_capped_throughput.value:
+        metadata_tpt = {}
         thread_lower = FLAGS[f"{BENCHMARK_NAME}_thread_lower_bound"].value
         thread_upper = FLAGS[f"{BENCHMARK_NAME}_thread_upper_bound"].value
         max_agg = 0
@@ -247,18 +251,17 @@ def Run(benchmark_spec):
                 benchmark_spec.vm_groups["clients"], thread_num
             )
             for raw_data in raw_results:
-                result_data1 = _ParseDefaultResults(
+                aggregate_result = _ParseDefaultResults(
                     raw_data,
-                    metadata,
+                    thread_metadata,
                     thread_num,
                 )
-                for data in result_data1:
-                    aggregate.append(data) 
-            aggregate_result = _CalculateAggregateResults(aggregate, thread_metadata)
             if FLAGS[f"{BENCHMARK_NAME}_latency_operation"].value == "write":
-                current_agg, current_p99 = aggregate_result[0].value, aggregate_result[2].value
+                current_agg, current_p99 = aggregate_result[1].value, aggregate_result[2].value
+                metadata_tpt = (thread_metadata if aggregate_result[1] is None else aggregate_result[1].metadata)
             else:
-                current_agg, current_p99 = aggregate_result[1].value,aggregate_result[3].value
+                current_agg, current_p99 = aggregate_result[3].value,aggregate_result[4].value
+                metadata_tpt = (thread_metadata if aggregate_result[3] is None else aggregate_result[4].metadata)
             # SLA violated: lower pipelines, continue
             if current_p99 > cassandra_latency_cap.value:
                 thread_upper = thread_mid - 1
@@ -267,25 +270,25 @@ def Run(benchmark_spec):
             if current_agg > max_agg:
                 max_agg = current_agg
                 if FLAGS[f"{BENCHMARK_NAME}_latency_operation"].value == "write":
-                    best_qps_sample = aggregate_result[0].value
-                    worst_p99_sample = aggregate_result[2].value
-                    other_qps_sample_text = "Read Queries per second"
-                    other_qps_sample = aggregate_result[1].value
-                    other_p99_sample_text = "Read p99 Latency"
-                    other_p99_sample = aggregate_result[3].value
-                else:
                     best_qps_sample = aggregate_result[1].value
-                    worst_p99_sample = aggregate_result[3].value
-                    other_qps_sample_text = "Write Queries per second"
-                    other_qps_sample = aggregate_result[0].value
-                    other_p99_sample_text = "Write p99 Latency"
+                    worst_p99_sample = aggregate_result[2].value
+                    other_qps_sample_text = "Read QPS"
+                    other_qps_sample = aggregate_result[3].value
+                    other_p99_sample_text = "Read p99_latency"
+                    other_p99_sample = aggregate_result[4].value
+                else:
+                    best_qps_sample = aggregate_result[3].value
+                    worst_p99_sample = aggregate_result[4].value
+                    other_qps_sample_text = "Write QPS"
+                    other_qps_sample = aggregate_result[1].value
+                    other_p99_sample_text = "Write p99_latency"
                     other_p99_sample = aggregate_result[2].value
             thread_lower = thread_mid + 1
         best_qps_sample = _ParseMaxTptResults(
             best_qps_sample,
             worst_p99_sample,
             FLAGS[f"{BENCHMARK_NAME}_latency_operation"].value,
-            metadata,
+            metadata_tpt,
             other_qps_sample_text,
             other_qps_sample,
             other_p99_sample_text,
@@ -332,17 +335,16 @@ def _CalculateAggregateResults(aggregate_data, metadata):
     write_worst_latency = 0
     read_worst_latency = 0
     for sample1 in aggregate_data:
-        if "Write Queries per second" in sample1.metric:
+        if "Write QPS" in sample1.metric:
             if sample1.value == 0.0:
                 write_aggregate = 0.0
                 read_aggregate = 0.0
                 write_worst_latency = 0.0
                 read_worst_latency = 0.0
-                break
-            else:
-                current_aggregate = sample1.value
-                write_aggregate += current_aggregate
-        if "Read Queries per second" in sample1.metric:
+            metadata_tpt = sample1.metadata
+            current_aggregate = sample1.value
+            write_aggregate += current_aggregate
+        if "Read QPS" in sample1.metric:
             current_aggregate = sample1.value
             read_aggregate += current_aggregate
         if "Write p99_latency" in sample1.metric:
@@ -353,31 +355,31 @@ def _CalculateAggregateResults(aggregate_data, metadata):
             read_worst_latency = max(read_worst_latency, current_latency)
      
     agg_write_sample = sample.Sample(
-        metric="Aggregate Write Queries per second",
+        metric="Aggregate Write QPS",
         value=write_aggregate,
         unit="write aggregate q/s",
-        metadata=metadata,
+        metadata=metadata_tpt,
     )
     results.append(agg_write_sample)
     agg_read_sample = sample.Sample(
-        metric="Aggregate Read Queries per second",
+        metric="Aggregate Read QPS",
         value=read_aggregate,
         unit="read aggregate q/s",
-        metadata=metadata,
+        metadata=metadata_tpt,
     )
     results.append(agg_read_sample)
     write_worst_latency_sample = sample.Sample(
-        metric="Worst Write p99 Latency",
+        metric="Write p99 Latency",
         value=write_worst_latency,
         unit="ms",
-        metadata=metadata,
+        metadata=metadata_tpt,
     )
     results.append(write_worst_latency_sample)
     read_worst_latency_sample = sample.Sample(
-        metric="Worst Read p99 Latency",
+        metric="Read p99 Latency",
         value=read_worst_latency,
         unit="ms",
-        metadata=metadata,
+        metadata=metadata_tpt,
     )
     results.append(read_worst_latency_sample)
     return results
@@ -394,9 +396,17 @@ def _ParseDefaultResults(raw_results, metadata, thread_num):
     read_agg_qps = 0
     read_p99_latency = 0
     instance_value = 0
+    port = 0
+    meta_port = {}
+    meta_instance = {}
     for result_sample in raw_results:
+        metadata = result_sample.metadata
         if result_sample.metric == str(thread_num) + "_Number of Instances":
             instance_value = result_sample.value
+            meta_instance = {"Instance Number": instance_value}
+        if result_sample.metric == str(thread_num) + "_port":
+            port = result_sample.value
+            meta_port = {"server_port": port}
         if result_sample.metric == str(thread_num) + "_Write Ops Throughput":
             write_agg_qps = result_sample.value
         if result_sample.metric == str(thread_num) + "_write_p99_latency":
@@ -407,56 +417,92 @@ def _ParseDefaultResults(raw_results, metadata, thread_num):
             read_p99_latency = result_sample.value
 
     return [
-        sample.Sample("Instance Number", instance_value, "", metadata),
-        sample.Sample("Number of Thread", thread_num, "", metadata),
-        sample.Sample("Write Queries per second", write_agg_qps, "q/s", metadata),
-        sample.Sample("Write p99_latency", write_p99_latency, "ms", metadata),
-        sample.Sample("Read Queries per second", read_agg_qps, "q/s", metadata),
-        sample.Sample("Read p99_latency", read_p99_latency, "ms", metadata),
+        sample.Sample("Threads", thread_num, "", metadata | meta_instance | meta_port),
+        sample.Sample("Write QPS", write_agg_qps, "q/s", metadata | meta_instance | meta_port),
+        sample.Sample("Write p99_latency", write_p99_latency, "ms", metadata | meta_instance | meta_port),
+        sample.Sample("Read QPS", read_agg_qps, "q/s", metadata | meta_instance | meta_port),
+        sample.Sample("Read p99_latency", read_p99_latency, "ms", metadata | meta_instance | meta_port),
     ]
 
 
 def _ParseMaxTptResults(
-    best_qps_sample,
-    worst_p99_sample,
+    best_qps_sample_value,
+    worst_p99_sample_value,
     latency_operation,
     metadata,
     other_qps_sample_text,
-    other_qps_sample,
+    other_qps_sample_value,
     other_p99_sample_text,
-    other_p99_sample,
+    other_p99_sample_value,
     thread_value,
 ):
     """Create a custom sample for max throughput mode results"""
+    latency_operation = "Read" if latency_operation == "read" else "Write"
+    other_operation = "Read" if latency_operation == "Write" else "Write"
     max_qps_sample = sample.Sample(
-        metric="Best " + latency_operation + " Queries per second",
-        value=best_qps_sample,
-        unit="best q/s",
+        metric=latency_operation + " QPS",
+        value=best_qps_sample_value,
+        unit="q/s",
+        metadata=metadata,
+    )
+
+    agg_best_sample = sample.Sample(
+        metric=f"Aggregate {latency_operation} QPS",
+        value=best_qps_sample_value,
+        unit="q/s",
         metadata=metadata,
     )
 
     threads_sample = sample.Sample(
-        metric="Best Cassandra Tlp Thread",
+        metric="TLP Threads",
         value=thread_value,
-        unit="cassandra_tlp_threads",
+        unit="threads",
+        metadata=metadata,
     )
 
     p99_sample = sample.Sample(
-        metric="Worst " + latency_operation + "p99 Latency",
-        value=worst_p99_sample,
+        metric=latency_operation + " p99_latency",
+        value=worst_p99_sample_value,
         unit="ms",
         metadata=metadata,
-    )
-    other_qps_sample = sample.Sample(
-        metric=other_qps_sample_text, value=other_qps_sample, unit="", metadata=metadata
     )
 
-    other_p99_sample = sample.Sample(
-        metric=other_p99_sample_text,
-        value=other_p99_sample,
+#    results.append(agg_read_sample)
+    latency_sample = sample.Sample(
+        metric=f"{latency_operation} p99 Latency",
+        value=worst_p99_sample_value,
         unit="ms",
         metadata=metadata,
     )
+#    results.append(write_worst_latency_sample)
+
+    if other_qps_sample_text:
+        other_qps_sample = sample.Sample(
+                metric=other_qps_sample_text,
+                value=other_qps_sample_value,
+                unit="",
+                metadata=metadata
+                )
+
+        agg_other_sample = sample.Sample(
+                metric=f"Aggregate {other_operation} QPS",
+                value=other_qps_sample_value,
+                unit="q/s",
+                metadata=metadata,
+                )
+
+        other_p99_sample = sample.Sample(
+                metric=other_p99_sample_text,
+                value=other_p99_sample_value,
+                unit="ms",
+                metadata=metadata,
+                )
+        other_latency_sample = sample.Sample(
+                metric=f"{other_operation} p99 Latency",
+                value=other_p99_sample_value,
+                unit="ms",
+                metadata=metadata,
+                )
 
     return (
         [max_qps_sample]
@@ -464,6 +510,10 @@ def _ParseMaxTptResults(
         + [p99_sample]
         + [other_qps_sample]
         + [other_p99_sample]
+        + [agg_best_sample]
+        + [latency_sample]
+        + [agg_other_sample]
+        + [other_latency_sample]
     )
 
 

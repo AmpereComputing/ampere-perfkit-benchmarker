@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -53,6 +53,12 @@ ampere_mysql_sysbench_localhost:
 # Ensure localhost flag is set for any phase of the benchmark
 FLAGS["ampere_mysql_sysbench_localhost"].value = True
 
+flags.DEFINE_bool(
+    f"{BENCHMARK_NAME}_throughput_mode",
+    False,
+    "Measure latency capped throughput. Use in conjunction with "
+    "mysql_latency_cap. Defaults to False. ",
+)
 
 def GetConfig(user_config):
     """Get User Config"""

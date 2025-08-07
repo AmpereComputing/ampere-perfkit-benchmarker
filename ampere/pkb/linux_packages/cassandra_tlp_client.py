@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Ampere Computing LLC
+# Copyright (c) 2024-2025, Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,11 +20,12 @@ import time
 import statistics
 from typing import Any, Dict, List, Text
 from absl import flags
-
 from ampere.pkb.common import download_utils
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import flag_util
+from ampere.pkb.common import bashrc_handler
+from ampere.pkb.common import firewall_handler
 
 PACKAGE_NAME = "ampere_cassandra_tlp_client"
 
@@ -43,7 +44,11 @@ flags.DEFINE_string(
     f"{PACKAGE_NAME}_duration", "10m", "Duration to run Cassandra TLP duration"
 )
 
-flags.DEFINE_string(f"{PACKAGE_NAME}_readrate", "0.5", "read rate for Cassandra TLP relative to writes, between 0-1 e.g. 0.1 means 90% writes")
+flags.DEFINE_string(
+    f"{PACKAGE_NAME}_readrate",
+    "0.5",
+    "read rate for Cassandra TLP relative to writes, between 0-1 e.g. 0.1 means 90% writes",
+)
 
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_jdk_url_for_tlp", "None", "jdk url for cassandra tlp"
@@ -106,7 +111,7 @@ def _Install(vm):
     lscpu = vm.CheckLsCpu()
     arch = lscpu.data["Architecture"]
     version = OPENJDK_VERSION.value
-    print("install jdk version")
+
     if arch == "x86_64":
         arch = "amd64"
     url = GetJDKURL(arch)
@@ -119,10 +124,11 @@ def _Install(vm):
         f"tar --strip-components=1 -C {java_home} -xzf -"
     )
     jdk_path = posixpath.join(java_dir, f"jdk-{version}", "bin")
-    vm.RemoteCommand(
-        f"export JAVA_HOME={java_home} && export PATH={jdk_path}:$PATH && "
-        f"cd {TLP_DIR} && ./gradlew shadowJar"
-    )
+    update_bashrc_commands = f"export JAVA_HOME={java_home};"
+    update_bashrc_commands += f"export PATH={jdk_path}:$PATH;"
+    bashrc_handler.update_bashrc(vm, "~/", update_bashrc_commands)
+    bashrc_handler.source_bashrc(vm, "~/")
+    vm.RemoteCommand(f"cd {TLP_DIR} && ./gradlew shadowJar")
     time.sleep(5)
 
 
@@ -145,11 +151,22 @@ def CleanNode(vm):
     vm.RemoteCommand(f"sudo rm -rf {download_utils.INSTALL_DIR}")
 
 
-def _ResultFilePath(vm, thread_num, instance):
+def _ResultFilePath(vm, thread_num, instance, port):
     tlp_stress_result = (
-        f"{vm.hostname}.tlp_results_instance{instance}_thread_{thread_num}.csv"
+        f"{vm.hostname}.tlp_results_{port}_instance{instance}_thread_{thread_num}.csv"
     )
     return posixpath.join(vm_util.VM_TMP_DIR, tlp_stress_result)
+
+
+def GetTLPStressVersion(client_vm, instance) -> str:
+    tlp_path = posixpath.join(
+        download_utils.INSTALL_DIR, f"cassandra_tlp_client_{instance}"
+    )
+    version, _ = client_vm.RemoteCommand(
+        f'grep "^version" {tlp_path}/build.gradle | cut -d" " -f2'
+    )
+    version = version.strip()
+    return version
 
 
 def GetCassandraTlpStressPath(cl, instance):
@@ -191,25 +208,20 @@ def RunCassandraTlpStressOverAllPorts(cassandra_vms, client, cl, thread_num):
     read_rate = FLAGS[f"{PACKAGE_NAME}_readrate"].value
     # for thread_num in thread_data:
     query = ""
-    version = OPENJDK_VERSION.value
-    java_dir = posixpath.join(download_utils.INSTALL_DIR, "java")
-    java_home = posixpath.join(java_dir, f"jdk-{version}")
-    jdk_path = posixpath.join(java_dir, f"jdk-{version}", "bin")
+    ports = []
     for cl_val in range(client_instances):
         instance = (cl * client_instances) + cl_val
         if FLAGS[f"{PACKAGE_NAME}_use_numactl"].value:
             cmd = [
                 " numactl -C "
                 + str(FLAGS.ampere_cassandra_tlp_client_use_cores[instance])
-                + f"export JAVA_HOME={java_home} && export PATH={jdk_path}:$PATH && "
                 + GetCassandraTlpStressPath(cl, cl_val)
                 + " run "
                 + FLAGS[f"{PACKAGE_NAME}_workload"].value
             ]
         else:
             cmd = [
-                f"export JAVA_HOME={java_home} && export PATH={jdk_path}:$PATH && "
-                + GetCassandraTlpStressPath(cl, cl_val)
+                GetCassandraTlpStressPath(cl, cl_val)
                 + " run "
                 + FLAGS[f"{PACKAGE_NAME}_workload"].value
             ]
@@ -218,17 +230,8 @@ def RunCassandraTlpStressOverAllPorts(cassandra_vms, client, cl, thread_num):
         cassandra_prometheus_port = CASSANDRA_PROMETHEUS_PORT + instance
         client.AllowPort(cassandra_server_port)
         client.AllowPort(cassandra_prometheus_port)
-        stdout, stderr = client.RemoteCommand(
-                "sudo firewall-cmd --version", ignore_failure=True
-                )
-        if not stderr:
-            client.RemoteCommand(
-                    f"sudo firewall-cmd --zone=public --add-port={cassandra_server_port}/tcp --permanent"
-                    )
-            client.RemoteCommand(
-                    f"sudo firewall-cmd --zone=public --add-port={cassandra_prometheus_port}/tcp --permanent"
-                    )
-            client.RemoteCommand(f"sudo firewall-cmd --reload")
+        ports.append(cassandra_server_port)
+        ports.append(cassandra_prometheus_port)
 
         data_node_ips = [vm.internal_ip for vm in cassandra_vms]
         data_node_ips_ind = ",".join(data_node_ips)
@@ -237,7 +240,7 @@ def RunCassandraTlpStressOverAllPorts(cassandra_vms, client, cl, thread_num):
             "--populate": FLAGS[f"{PACKAGE_NAME}_populate"].value,
             "--partitions": FLAGS[f"{PACKAGE_NAME}_partitions"].value,
             "--duration": FLAGS[f"{PACKAGE_NAME}_duration"].value,
-            "--csv": _ResultFilePath(client, thread_num, cl_val),
+            "--csv": _ResultFilePath(client, thread_num, cl_val, cassandra_server_port),
             "--port": cassandra_server_port,
             "--prometheusport": cassandra_prometheus_port,
             "--threads": thread_num,
@@ -248,7 +251,9 @@ def RunCassandraTlpStressOverAllPorts(cassandra_vms, client, cl, thread_num):
                 cmd.extend([f"{arg}", str(value)])
         cassandra_query = cassandra_query + " ".join(cmd)
         cassandra_query = cassandra_query + " --drop & "
-        query =  query + cassandra_query
+        query = query + cassandra_query
+    ports_string = ", ".join(str(port) for port in ports)
+    firewall_handler.add_port_to_nftables(client, f"{{ {ports_string} }}")
     client.RemoteCommand(query, ignore_failure=True)
     client.RemoteCommand("sudo pkill -9 java", ignore_failure=True)
     time.sleep(10)
@@ -257,7 +262,10 @@ def RunCassandraTlpStressOverAllPorts(cassandra_vms, client, cl, thread_num):
 def Stop(vm):
     """Stops Cassandra TLP on 'vm'."""
     vm.RemoteCommand("sudo pkill -9 java", ignore_failure=True)
+    bashrc_handler.restore_bashrc(vm, "~/")
     time.sleep(10)
+    #restore nftables.conf in /etc folder
+    firewall_handler.restore_nftables(vm)
 
 
 def GenerateMetadataFromFlags(clients, thread_num):
@@ -268,35 +276,51 @@ def GenerateMetadataFromFlags(clients, thread_num):
         {
             "num_server_nodes": 1,
             "num_client_nodes": len(clients),
-            "tlp_thread_value": thread_num,
-            "tlp_workload": FLAGS[f"{PACKAGE_NAME}_workload"].value,
+            "Threads": thread_num,
+            "TLP Workload": FLAGS[f"{PACKAGE_NAME}_workload"].value,
             "tlp_duration": FLAGS[f"{PACKAGE_NAME}_duration"].value,
             "tlp_partition": FLAGS[f"{PACKAGE_NAME}_partitions"].value,
             "tlp_populate": FLAGS[f"{PACKAGE_NAME}_populate"].value,
+            "cassandra_version": FLAGS.ampere_cassandra_server_version,
         }
     )
     return metadata
 
 
+def GenerateMetadataPerClient(client_vm, thread_num, client_num):
+    """Generate metadata per client run."""
+    return {
+        "client_vm": client_vm.hostname,
+        "Threads": thread_num,
+        "client_num": client_num,
+        "cassandra_tlp_version": GetTLPStressVersion(client_vm, client_num),
+    }
+
+
 def CollectResults(clients, thread_num):
     """Collect results from CSV files"""
     samples = []
+    meta = {}
     # for thread_num in thread_data:
-    metadata = GenerateMetadataFromFlags(clients, thread_num)
+    metadata1 = GenerateMetadataFromFlags(clients, thread_num)
     num_clients = len(clients)
     for cl in range(num_clients):
         vm = clients[cl]
-        results = _Run(vm, thread_num)
+        meta = GenerateMetadataPerClient(vm, thread_num, cl)
+        metadata = metadata1 | meta
+        results = _Run(vm, thread_num, cl)
         for sam in results:
             samples.append(sam.GetSamples(metadata))
     return samples
 
 
-def _Run(vm, thread_num):
+def _Run(vm, thread_num, client_num):
     client_instances = FLAGS[f"{PACKAGE_NAME}_instances"].value
     summary_data = []
     for cl_val in range(client_instances):
-        result_path = _ResultFilePath(vm, thread_num, cl_val)
+        instance = (client_num * client_instances) + cl_val
+        cassandra_server_port = CASSANDRA_PORT + instance
+        result_path = _ResultFilePath(vm, thread_num, cl_val, cassandra_server_port)
         check_file, _ = vm.RemoteCommand(
             f'if [ -f {result_path} ]; then echo "File found!" > checkfile.log; '
             f'else echo "File not found!" > checkfile.log;  fi;'
@@ -306,7 +330,7 @@ def _Run(vm, thread_num):
         if check_file == "File found!":
             stress_result = (
                 vm.hostname
-                + ".tlp_results_instance"
+                + f".tlp_results_{cassandra_server_port}_instance"
                 + str(cl_val)
                 + "_thread_"
                 + str(thread_num)
@@ -350,13 +374,22 @@ def _Run(vm, thread_num):
                 + str(thread_num)
                 + ","
                 + str(instance_value)
+                + ","
+                + str(cassandra_server_port)
             )
             local_data = CassandraStressTlpResult.Parse(summary)
             summary_data.append(local_data)
             vm.RemoteCommand(f"rm -rf {result_path}")
         else:
             instance_value = cl_val + 1
-            summary = "0,0,0,0," + str(thread_num) + "," + str(instance_value)
+            summary = (
+                "0,0,0,0,"
+                + str(thread_num)
+                + ","
+                + str(instance_value)
+                + ","
+                + str(cassandra_server_port)
+            )
             local_data = CassandraStressTlpResult.Parse(summary)
             summary_data.append(local_data)
     return summary_data
@@ -372,6 +405,7 @@ class CassandraStressTlpResult:
     read_p99_latency: float
     thread_num: int
     instance_value: int
+    port: int
 
     @classmethod
     def Parse(cls, stress_results: List) -> "CassandraStressTlpResult":
@@ -384,6 +418,7 @@ class CassandraStressTlpResult:
             read_p99_latency=aggregated_result.read_p99_latency,
             thread_num=aggregated_result.thread_num,
             instance_value=aggregated_result.instance_value,
+            port=aggregated_result.port,
         )
 
     def GetSamples(self, metadata: Dict[str, Any]) -> List[sample.Sample]:
@@ -404,6 +439,7 @@ class CassandraStressTlpResult:
             sample.Sample(
                 f"{self.thread_num}_Number of Threads", self.thread_num, "", metadata
             ),
+            sample.Sample(f"{self.thread_num}_port", self.port, "", metadata),
             sample.Sample(
                 f"{self.thread_num}_Number of Instances",
                 self.instance_value,
@@ -436,6 +472,7 @@ class CassandraStressAggregateResult:
     read_p99_latency: float
     thread_num: int
     instance_value: int
+    port: int
 
 
 def _ParseTotalThroughputAndLatency(
@@ -448,6 +485,7 @@ def _ParseTotalThroughputAndLatency(
     read_latency = 0
     thread_num = 0
     instance_value = 0
+    port = 0
     stress_data = stress_results.split(",")
     write_op_rate = stress_data[0]
     read_op_rate = stress_data[1]
@@ -455,6 +493,7 @@ def _ParseTotalThroughputAndLatency(
     read_latency = stress_data[3]
     thread_num = stress_data[4]
     instance_value = stress_data[5]
+    port = stress_data[6]
     return CassandraStressAggregateResult(
         write_ops_per_sec=write_op_rate,
         write_p99_latency=write_latency,
@@ -462,4 +501,5 @@ def _ParseTotalThroughputAndLatency(
         read_p99_latency=read_latency,
         thread_num=thread_num,
         instance_value=instance_value,
+        port=port,
     )
