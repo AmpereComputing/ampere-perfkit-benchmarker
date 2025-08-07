@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,7 +46,7 @@ localhost_option = flags.DEFINE_bool(
 )
 
 mysql_latency_capped_throughput = flags.DEFINE_bool(
-    f"{BENCHMARK_NAME}_latency_capped_throughput",
+    f"{BENCHMARK_NAME}_throughput_mode",
     False,
     "Measure latency capped throughput. Use in conjunction with "
     "mysql_latency_cap. Defaults to False. ",
@@ -180,6 +180,8 @@ def Run(benchmark_spec):
         )
 
     def RunTestOnMysqlSysbenchClient():
+        clients = benchmark_spec.vm_groups["clients"]
+        num_clients = len(clients)
         args = [((client, i, num_clients), {}) for i, client in enumerate(clients)]
         raw_results = background_tasks.RunThreaded(DistributeClientsToPorts, args)
         return raw_results
@@ -191,6 +193,8 @@ def Run(benchmark_spec):
 
     def RunLatencyCappedThroughput():
         raw_result = []
+        metadata_tpt = {}
+        meta = {}
         max_tps = 0
         thread_value = None
         best_qps_sample = None
@@ -220,6 +224,7 @@ def Run(benchmark_spec):
             p95_latency_sample = results[1].value
             qps_sample = results[3].value
             tps_sample = results[2].value
+      #      metadata_tpt = results[0].metadata
             current_tps, current_p95 = tps_sample, p95_latency_sample
             # SLA violated: lower pipelines, continue
             if current_p95 > mysql_latency_cap.value:
@@ -233,6 +238,7 @@ def Run(benchmark_spec):
                 worst_p95_sample = p95_latency_sample
                 thread_value = num_thread
                 best_results = results
+       #         metadata_tpt.update({'Threads': num_thread,'Workload': workload_name,})
             thread_lower = thread_mid + thread_incr
         metadata = sysbench.GenerateMetadataFromFlags(num_clients, thread_value)
         best_qps_sample = _ParseMaxTptResults(
@@ -247,13 +253,14 @@ def Run(benchmark_spec):
         return best_qps_sample
     
     sysbench_workloads = FLAGS[f"{sysbench.PACKAGE_NAME}_workloads"].value
-    if len(sysbench_workloads) != 1 and mysql_latency_capped_throughput.value:
+    if len(sysbench_workloads) != 1 and (mysql_latency_capped_throughput.value == True or FLAGS.ampere_mysql_sysbench_localhost_throughput_mode == True):
         raise ValueError(
             f"MySQL max throughput mode is only compatible with one sysbench workload at a time. "
             f"Received {sysbench.PACKAGE_NAME}_workloads={sysbench_workloads}"
         )
 
-    if mysql_latency_capped_throughput.value:
+    if (mysql_latency_capped_throughput.value or 
+        FLAGS.ampere_mysql_sysbench_localhost_throughput_mode):
         best_qps_sample = RunLatencyCappedThroughput()
         return best_qps_sample
 
@@ -293,7 +300,6 @@ def _ParseMaxTptResults(
     best_results,
 ):
     """Create a custom sample for max throughput mode results"""
-    print("best_results", best_results)
     if best_results is None:
         workload_sample = sample.Sample(
             metric=workload_name,
@@ -305,7 +311,7 @@ def _ParseMaxTptResults(
             value=thread_value,
             unit="",
         )
-        p99_sample = sample.Sample(
+        p95_sample = sample.Sample(
             metric="Cannot converge for given SLA.",
             value=None,
             unit="",
@@ -321,38 +327,42 @@ def _ParseMaxTptResults(
             unit="",
         )
     else:
+        meta = {'Threads': thread_value,'Workload': workload_name,}
+        metadata = metadata | meta
         workload_sample = sample.Sample(
             metric=workload_name,
             value=None,
             unit="",
+            metadata=metadata,
         )
         threads_sample = sample.Sample(
-            metric="Best Mysql Sysbench Thread",
+            metric="Sysbench Thread",
             value=thread_value,
             unit="",
+            metadata=metadata,
         )
-        p99_sample = sample.Sample(
-            metric="Worst p95 Latency",
+        p95_sample = sample.Sample(
+            metric="p95_latency",
             value=worst_p95_sample,
             unit="ms",
             metadata=metadata,
         )
         max_qps_sample = sample.Sample(
-            metric="Best QPS",
+            metric="QPS",
             value=best_qps_sample,
-            unit="best q/s",
+            unit="q/s",
             metadata=metadata,
         )
         max_tps_sample = sample.Sample(
-            metric="Best TPS",
+            metric="TPS",
             value=best_tps_sample,
-            unit="best t/s",
+            unit="t/s",
             metadata=metadata,
         )
     return (
         [workload_sample]
         + [threads_sample]
-        + [p99_sample]
+        + [p95_sample]
         + [max_qps_sample]
         + [max_tps_sample]
     )

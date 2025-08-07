@@ -44,6 +44,10 @@ def Install(vm):
     """
     vm.Install("numactl")
     vm.Install("build_tools")
+    os_type = vm.os_info
+    version_number = [int(s) for s in os_type.split() if s.isdigit()]
+    if ("Fedora" in os_type) and version_number[0] >= 40:
+        vm.InstallPackages("glibc-static")
     # Get flag values
     multichase_zip = FLAGS[f"{PACKAGE_NAME}_zip"].value
     # Send zip to VM

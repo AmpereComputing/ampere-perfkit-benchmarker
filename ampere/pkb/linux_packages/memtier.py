@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,9 +21,11 @@ import logging
 import math
 import os
 import pathlib
+import posixpath
 import re
 import time
 from typing import Any, Dict, List, Optional, Text, Tuple, Union
+from urllib.parse import urlparse
 
 from absl import flags
 from perfkitbenchmarker import errors
@@ -211,6 +213,49 @@ _NUMA_CORES = flags.DEFINE_list(
 )
 
 
+def _build_libevent(vm):
+    """
+    Builds a static version of libevent under /opt/pkb/libevent
+    which is linked when building memtier_benchmark
+    """
+    libevent_url = "https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz"
+    libevent_tar = posixpath.basename(urlparse(libevent_url).path)
+    libevent_tar_path = f"{download_utils.INSTALL_DIR}/{libevent_tar}"
+    libevent_dir = libevent_tar_path.strip(".tar.gz")
+    vm.RemoteCommand(f"wget -P {download_utils.INSTALL_DIR} {libevent_url}")
+    vm.RemoteCommand(f"tar -xvf {libevent_tar_path} -C {download_utils.INSTALL_DIR}")
+    vm.RemoteCommand(f"cd {libevent_dir} && ./autogen.sh")
+    vm.RemoteCommand(
+        f"cd {libevent_dir} && CFLAGS='-O3' ./configure "
+        f"--prefix={download_utils.INSTALL_DIR}/libevent --disable-shared --enable-static"
+    )
+    vm.RemoteCommand(f"cd {libevent_dir} && make -j")
+    vm.RemoteCommand(f"cd {libevent_dir} && sudo make install")
+
+
+def _build_memtier_benchmark(vm):
+    """
+    Builds memtier_benchmark with static libevent from /opt/pkb/libevent
+    """
+    pkg_config = f"PKG_CONFIG_PATH={download_utils.INSTALL_DIR}/libevent/lib/pkgconfig"
+    vm.RemoteCommand(f"git clone {GIT_REPO} {MEMTIER_DIR}")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && git checkout {GIT_TAG}")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && touch config.h.in")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && libtoolize --force")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && aclocal")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && automake --add-missing")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && autoconf")
+    vm.RemoteCommand(
+        f"cd {MEMTIER_DIR} && {pkg_config} ./configure "
+        f"--prefix={download_utils.INSTALL_DIR}/libevent "
+        f"--disable-static --enable-shared --disable-tls"
+    )
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && make -j")
+    vm.RemoteCommand(f"cd {MEMTIER_DIR} && sudo make install")
+    # Make installs to /opt/pkb/libevent/bin/memtier_benchmark, symlink to /usr/local/bin
+    vm.RemoteCommand(f"sudo ln -s {download_utils.INSTALL_DIR}/libevent/bin/memtier_benchmark /usr/local/bin")
+
+
 def YumInstall(vm):
     """Installs the memtier package on the VM."""
     vm.Install("build_tools")
@@ -218,15 +263,9 @@ def YumInstall(vm):
     # Catch cases where packages aren't available with --skip-broken (RHEL9 on Arm doesn't have libmemcached-devel)
     vm.InstallPackages(YUM_PACKAGES + " " + "--skip-broken")
     # Install additional packages according to getting started instructions from memtier_benchmark repo
-    vm.InstallPackages("autoconf automake make gcc-c++" + " " + "--skip-broken")
-
-    vm.RemoteCommand("git clone {0} {1}".format(GIT_REPO, MEMTIER_DIR))
-    vm.RemoteCommand("cd {0} && git checkout {1}".format(MEMTIER_DIR, GIT_TAG))
-    pkg_config = "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
-    vm.RemoteCommand(
-        "cd {0} && autoreconf -ivf && {1} ./configure && "
-        "sudo make install".format(MEMTIER_DIR, pkg_config)
-    )
+    vm.InstallPackages("autoconf automake make gcc-c++ libtool" + " " + "--skip-broken")
+    _build_libevent(vm)
+    _build_memtier_benchmark(vm)
 
 
 def AptInstall(vm):
@@ -234,17 +273,15 @@ def AptInstall(vm):
     vm.Install("build_tools")
     vm.InstallPackages("numactl")
     vm.InstallPackages(APT_PACKAGES)
-    vm.RemoteCommand("git clone {0} {1}".format(GIT_REPO, MEMTIER_DIR))
-    vm.RemoteCommand("cd {0} && git checkout {1}".format(MEMTIER_DIR, GIT_TAG))
-    vm.RemoteCommand(
-        "cd {0} && autoreconf -ivf && ./configure && "
-        "sudo make install".format(MEMTIER_DIR)
-    )
+    _build_libevent(vm)
+    _build_memtier_benchmark(vm)
 
 
 def _Uninstall(vm):
     """Uninstalls the memtier package on the VM."""
-    vm.RemoteCommand("cd {0} && sudo make uninstall".format(MEMTIER_DIR))
+    vm.RemoteCommand("cd {0} && sudo make uninstall".format(MEMTIER_DIR), ignore_failure=True)
+    # Remove symlink to /opt/pkb/libevent/bin/memtier_benchmark
+    vm.RemoteCommand("sudo rm /usr/local/bin/memtier_benchmark", ignore_failure=True)
 
 
 def YumUninstall(vm):
@@ -356,8 +393,6 @@ def Load(
     )
     # TODO: debug
     logging.debug(f"MEMTIER LOAD: {cmd}")
-    print("memtier cmd")
-    print(cmd)
     client_vm.RobustRemoteCommand(cmd)
 
 
@@ -393,7 +428,7 @@ def RunOverAllThreadsPipelinesAndClients(
                     numa_core=numa_core,
                 )
                 metadata = GetMetadata(
-                    clients=client, threads=client_thread, pipeline=pipeline
+                    clients=client, threads=client_thread, pipeline=pipeline, memtier_vm=client_vm, server_port=server_port
                 )
                 samples.extend(results.GetSamples(metadata))
     return samples
@@ -449,6 +484,8 @@ def MeasureLatencyCappedThroughput(
                     clients=parameters.clients,
                     threads=parameters.threads,
                     pipeline=parameters.pipelines,
+                    memtier_vm=client_vm,
+                    server_port=server_port,
                 )
             # 95 percentile used to decide latency cap
             parameters = modify_load_func(parameters, result.p95_latency)
@@ -599,7 +636,7 @@ def RunGetLatencyAtCpu(cloud_instance, client_vms):
                 process_args, len(process_args)
             )
             metadata = GetMetadata(
-                clients=current_clients, threads=threads, pipeline=pipeline
+                clients=current_clients, threads=threads, pipeline=pipeline, memtier_vm=load_vm,server_port=server_port
             )
             metadata["measured_cpu_percent"] = cloud_instance.MeasureCpuUtilization(
                 MEMTIER_CPU_DURATION.value
@@ -717,7 +754,7 @@ def _Run(
     return MemtierResult.Parse(summary_data, time_series_json)
 
 
-def GetMetadata(clients: int, threads: int, pipeline: int) -> Dict[str, Any]:
+def GetMetadata(clients: int, threads: int, pipeline: int, memtier_vm, server_port) -> Dict[str, Any]:
     """Metadata for memtier test."""
     meta = {
         "memtier_protocol": MEMTIER_PROTOCOL.value,
@@ -733,6 +770,8 @@ def GetMetadata(clients: int, threads: int, pipeline: int) -> Dict[str, Any]:
         "memtier_version": GIT_TAG,
         "memtier_run_mode": MEMTIER_RUN_MODE.value,
         "memtier_cluster_mode": MEMTIER_CLUSTER_MODE.value,
+        "client_vm": memtier_vm.hostname,
+        "server_port": server_port,
     }
     if MEMTIER_RUN_DURATION.value:
         meta["memtier_run_duration"] = MEMTIER_RUN_DURATION.value

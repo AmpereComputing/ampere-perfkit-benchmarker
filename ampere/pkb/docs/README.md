@@ -105,24 +105,6 @@ If the system does not already have Python 3.11 or higher, install it explicitly
 ```bash
 sudo dnf install python3.11
 ```
-# install pyenv to install python on persistent home directory
-curl https://pyenv.run | bash
-
-# add to path
-echo 'export PATH="$HOME/.pyenv/bin:$PATH"' >> ~/.bashrc
-echo 'eval "$(pyenv init -)"' >> ~/.bashrc
-echo 'eval "$(pyenv virtualenv-init -)"' >> ~/.bashrc
-
-# update bashrc
-source ~/.bashrc
-
-# install python 3.12 and make default
-pyenv install 3.12
-pyenv global 3.12
-```
-<!-- copybara:strip_begin(internal) -->
-<!--* pragma: { seclinter_this_is_fine: false } *-->
-<!-- copybara:strip_end -->
 
 ## Setup APT with setup.sh
 

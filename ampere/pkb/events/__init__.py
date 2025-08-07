@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Ampere Computing LLC
+# Copyright (c) 2024-2025, Ampere Computing LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,7 @@
 # limitations under the License.
 
 from perfkitbenchmarker import events
-from . import ampere_tune, irq_pin, provision_disk
-
+from . import ampere_tune, irq_pin, provision_disk, ampere_find_jdk
 
 def register():
     """
@@ -71,4 +70,5 @@ def register():
     events.initialization_complete.connect(ampere_tune.register_all)
     events.initialization_complete.connect(irq_pin.register_all)
     events.initialization_complete.connect(provision_disk.register_all)
+    events.initialization_complete.connect(ampere_find_jdk.register_all)
 

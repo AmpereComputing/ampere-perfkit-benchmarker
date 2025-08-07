@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2015 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,9 +24,11 @@ import posixpath
 import time
 from absl import flags
 from six.moves import range
-
+from typing import Any, Dict
 from perfkitbenchmarker import os_types
 from ampere.pkb.common import download_utils
+from ampere.pkb.common import bashrc_handler
+from ampere.pkb.common import firewall_handler
 
 CASSANDRA_DIR = posixpath.join(download_utils.INSTALL_DIR, "cassandra")
 CASSANDRA_PID = posixpath.join(CASSANDRA_DIR, "cassandra.pid")
@@ -73,8 +75,13 @@ flags.DEFINE_list(
     f"{PACKAGE_NAME}_use_cores", [], "add cores to specific instances of Cassandra"
 )
 
-flags.DEFINE_integer(f'{PACKAGE_NAME}_instances', 1,
-                            'Concurrent cassandra instances.')
+flags.DEFINE_integer(f"{PACKAGE_NAME}_instances", 1, "Concurrent cassandra instances.")
+
+flags.DEFINE_integer(
+    f"{PACKAGE_NAME}_write_request_timeout_in_ms",
+    20000,
+    "number of milliseconds that TLP waits for a write operation to complete",
+)
 
 CASSANDRA_PORT = 9042
 CASSANDRA_JMX_PORT = 7199
@@ -86,14 +93,16 @@ def GetJDKURL(arch) -> str:
     version = FLAGS[f"{PACKAGE_NAME}_jdk_version"].value
     if arch == "x86_64":
         arch = "x64"
-    
-    _JDK_HASH = {
-        "15.0.2" : "0d1cfde4252546c6931946de8db48ee2/7",
-        "17.0.2" : "dfd4a8d0985749f896bed50d7138ee7f/8",
-    }
-    
-    url = f"https://download.java.net/java/GA/jdk{version}/{_JDK_HASH[version]}/GPL/openjdk-{version}_linux-{arch}_bin.tar.gz"
 
+    _JDK_HASH = {
+        "15.0.2": "0d1cfde4252546c6931946de8db48ee2/7",
+        "17.0.2": "dfd4a8d0985749f896bed50d7138ee7f/8",
+    }
+
+    url = (
+        f"https://download.java.net/java/GA/jdk{version}/{_JDK_HASH[version]}"
+        f"/GPL/openjdk-{version}_linux-{arch}_bin.tar.gz"
+    )
     return url
 
 
@@ -103,6 +112,7 @@ def _Install(vm):
     cassandra_version = FLAGS[f"{PACKAGE_NAME}_version"].value
     vm.InstallPackages("curl")
     vm.InstallPackages("wget")
+    vm.InstallPackages("numactl")
     vm.Install("build_tools")
     vm.RemoteCommand(f"sudo rm -rf {CASSANDRA_DIR}")
     vm.RemoteCommand("sleep 2")
@@ -269,27 +279,21 @@ def _ConfigureYaml(vm, instance):
     SedStrings("^rpc_address:.*$", f"rpc_address: {vm.internal_ip}", yaml_path, vm)
     SedStrings(
         "^native_transport_port:.*$",
-        f"native_transport_port: " + str(tmp_cassandra_port) + "",
+        f"native_transport_port: {tmp_cassandra_port}",
+        yaml_path,
+        vm,
+    )
+    write_request_timeout_in_ms = FLAGS[
+        f"{PACKAGE_NAME}_write_request_timeout_in_ms"
+    ].value
+    SedStrings(
+        "^write_request_timeout_in_ms.*$",
+        f"write_request_timeout_in_ms: {write_request_timeout_in_ms}",
         yaml_path,
         vm,
     )
     vm.AllowPort(tmp_cassandra_port)
-    # Check if firewalld is installed on system by default
-    stdout, stderr = vm.RemoteCommand(
-            "sudo firewall-cmd --version", ignore_failure=True
-            )
-    if not stderr:
-        vm.RemoteCommand(
-                f"sudo firewall-cmd --zone=public --add-port={tmp_cassandra_storage_port}/tcp --permanent"
-                )
-        vm.RemoteCommand(
-                f"sudo firewall-cmd --zone=public --add-port={ssl_cassandra_storage_port}/tcp --permanent"
-                )
-        vm.RemoteCommand(
-                f"sudo firewall-cmd --zone=public --add-port={tmp_cassandra_port}/tcp --permanent"
-                )
-        vm.RemoteCommand(f"sudo firewall-cmd --reload")
-
+    return tmp_cassandra_port, ssl_cassandra_storage_port, tmp_cassandra_storage_port
 
 
 def _ConfigureCassandraJVMOptions(vm, instance):
@@ -351,7 +355,9 @@ def _ConfigureCassandraJVMOptions(vm, instance):
         jvm_options_path,
         vm,
     )
-    # replace_str11 = rf"s|^#-XX:+ParallelRefProcEnabled.*$|-XX:+UseParallelGC\n-XX:+ParallelRefProcEnabled\n-XX:+UseCompressedOops\n-XX:ObjectAlignmentInBytes={ObjectAlignmentInByte}|g"
+    # replace_str11 = rf"s|^#-XX:+ParallelRefProcEnabled.*$|-XX:+UseParallelGC
+    # \n-XX:+ParallelRefProcEnabled\n-XX:+UseCompressedOops
+    # \n-XX:ObjectAlignmentInBytes={ObjectAlignmentInByte}|g"
 
     SedStrings(
         "^#-XX:+ParallelRefProcEnabled.*$",
@@ -390,8 +396,6 @@ def _ConfigureCassandraENVOptions(vm, instance):
         vm,
     )
     SedStrings("#HEAP_NEWSIZE=.*$", 'HEAP_NEWSIZE="12288M"', cassandra_env_path, vm)
-    # replace_env_str6 = rf's|# JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true"| JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true"|g'
-    # vm.RemoteCommand(f"sed -i '{replace_env_str6}' {cassandra_env_path} ")
     SedStrings(
         '# JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true"',
         ' JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true"',
@@ -419,10 +423,13 @@ def Configure(vm):
             totaldisks = FLAGS[f"{PACKAGE_NAME}_instances"].value * 2
             for disk in range(totaldisks):
                 vm.RemoteCommand(f"mkdir {download_utils.INSTALL_DIR}/disk{disk}")
+    ports = []
     for instance in range(FLAGS[f"{PACKAGE_NAME}_instances"].value):
-        _ConfigureYaml(vm, instance)
+        [ports.append(port) for port in _ConfigureYaml(vm, instance)]
         _ConfigureCassandraJVMOptions(vm, instance)
         _ConfigureCassandraENVOptions(vm, instance)
+    ports_string = ", ".join(str(port) for port in ports)
+    firewall_handler.add_port_to_nftables(vm, f"{{ {ports_string} }}")
 
 
 def Start(vm, instance_no):
@@ -432,20 +439,26 @@ def Start(vm, instance_no):
     folder_name = "cassandra_" + str(instance)
     cassandra_conf_dir = posixpath.join(download_utils.INSTALL_DIR, folder_name, "conf")
     cassandra_dir = posixpath.join(download_utils.INSTALL_DIR, "cassandra")
+    if instance == 1:
+        update_bashrc_commands = (
+            f"export JAVA_HOME={download_utils.INSTALL_DIR}/jdk-{jdk_version}/;"
+        )
+        update_bashrc_commands += (
+            f"export PATH={download_utils.INSTALL_DIR}/jdk-{jdk_version}/bin:$PATH;"
+        )
+        bashrc_handler.update_bashrc(vm, "~/", update_bashrc_commands)
+        bashrc_handler.source_bashrc(vm, "~/")
     cassandra_str = ""
     if FLAGS[f"{PACKAGE_NAME}_use_numactl"].value:
         cassandra_str = (
-            f"export JAVA_HOME={download_utils.INSTALL_DIR}/jdk-{jdk_version}/ && "
-            f" export PATH=$PATH:{download_utils.INSTALL_DIR}/jdk-{jdk_version}/bin &&"
             f" export CASSANDRA_CONF={cassandra_conf_dir} && "
             f" numactl -C {FLAGS.ampere_cassandra_server_use_cores[instance_no]} "
             f"{cassandra_dir}/bin/cassandra & "
         )
     else:
         cassandra_str = (
-            f"export JAVA_HOME={download_utils.INSTALL_DIR}/jdk-{jdk_version}/ &&"
-            f"export PATH=$PATH:{download_utils.INSTALL_DIR}/jdk-{jdk_version}/bin &&"
-            f" export CASSANDRA_CONF={cassandra_conf_dir} && {cassandra_dir}/bin/cassandra & "
+            f" export CASSANDRA_CONF={cassandra_conf_dir} && "
+            f"{cassandra_dir}/bin/cassandra & "
         )
     return cassandra_str
 
@@ -463,6 +476,9 @@ def CleanNode(vm, no_of_instances):
       vm: VirtualMachine. VM to clean.
       no_of_instances: Number of Instances spawned
     """
+    bashrc_handler.restore_bashrc(vm, "~/")
+    #restore nftables.conf in /etc folder
+    firewall_handler.restore_nftables(vm)
     for i in range(no_of_instances):
         disk_instance = i * 2
         instance = i + 1
@@ -507,6 +523,12 @@ def CleanNode(vm, no_of_instances):
         vm.RemoteCommand(f"sudo umount {commitlog_dir_name}")
         vm.RemoteCommand(f"sudo rm -rf {cassandra_dir}")
     vm.RemoteCommand(f"sudo rm -rf {download_utils.INSTALL_DIR}")
+
+
+def GetMetadata() -> Dict[str, Any]:
+    return {
+        "cassandra_server_version": FLAGS[f"{PACKAGE_NAME}_version"].value,
+    }
 
 
 def GetCassandraCqlshPath():

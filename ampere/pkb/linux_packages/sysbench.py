@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2022 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,6 +46,14 @@ _IGNORE_CONCURRENT = flags.DEFINE_bool(
 
 flags.DEFINE_string(
     f"{PACKAGE_NAME}_db_engine", "mysql", "sysbench works on both mysql and pgsql"
+)
+
+flags.DEFINE_bool(
+    f"{PACKAGE_NAME}_use_numactl", False, "flag to enable pinning sysbench client threads"
+)
+
+flags.DEFINE_string(
+    f"{PACKAGE_NAME}_client_cores", None, "sysbench works on both mysql and pgsql"
 )
 
 flags.DEFINE_string(
@@ -270,7 +278,6 @@ def _GetCommonSysbenchOptions():
     # https://callisto.digital/posts/tools/using-sysbench-to-benchmark-mysql-5-7/
     if engine_type == "mysql":
         result += [
-            f"--db-ps-mode={DISABLE}",
             # Error 1205: Lock wait timeout exceeded
             # Could happen when we overload the database
             "--mysql-ignore-errors=1213,1205,1020,2013",
@@ -322,9 +329,15 @@ def _GetSysbenchCommand(
             f"export LD_LIBRARY_PATH=/opt/pkb/mysql/lib:"
             f"{libtirpc_install_dir}/lib:$LD_LIBRARY_PATH; "
         )
+
+    if FLAGS[f"{PACKAGE_NAME}_use_numactl"].value:
+        numa_prefix = f"numactl -C {FLAGS.ampere_sysbench_client_cores}"
+    else:
+        numa_prefix = ""
+
     cmd = [
-        f"{check_openssl}  LD_PRELOAD=/opt/pkb/jmalloc/lib/libjemalloc.so "
-        f"{SYSBENCH_DIR}/bin/sysbench "
+        f"{check_openssl}  LD_PRELOAD=/opt/pkb/jmalloc/lib/libjemalloc.so &&"
+        f" {numa_prefix} {SYSBENCH_DIR}/bin/sysbench "
         f"{SYSBENCH_DIR}/share/sysbench/{workload}.lua",
         f"--table-size={TABLE_SIZE.value:d}",
         f"--tables={TABLE_COUNT.value:d}",
@@ -339,6 +352,7 @@ def _GetSysbenchCommand(
         f"--rand-type={FLAGS[f'{PACKAGE_NAME}_rand_type'].value}",
         f"--rand-seed={FLAGS[f'{PACKAGE_NAME}_rand_seed'].value:d}",
     ]
+
     query = query + " ".join(
         cmd + _GetSysbenchConnectionParameter(mysql_host) + _GetCommonSysbenchOptions()
     )
@@ -448,6 +462,9 @@ def RunSysbenchOverAllPorts(mysql_vms, client, client_number, total_clients):
             )
             stdout, _ = client.RobustRemoteCommand(run_cmd, timeout=RUN_TIME.value + 60)
             metadata = GenerateMetadataFromFlags(total_clients, thread_num)
+            metadata.update({'client_vm': client.hostname,
+                             'Threads': thread_num,
+                             'Workload': workload})
             raw_result_data = _ParseSysbenchLatency(
                 thread_num, workload, stdout, metadata
             ) + _ParseSysbenchTransactions(workload, stdout, metadata)
@@ -466,8 +483,8 @@ def _ParseSysbenchTransactions(
         r"queries: *[0-9]* *\(([0-9]*[.]?[0-9]+) per sec.\)", sysbench_output
     )
     return [
-        sample.Sample(f"{workload}_TPS", transactions_per_second, "tps", metadata),
-        sample.Sample(f"{workload}_QPS", queries_per_second, "qps", metadata),
+        sample.Sample("TPS", transactions_per_second, "tps", metadata),
+        sample.Sample("QPS", queries_per_second, "qps", metadata),
     ]
 
 
@@ -479,9 +496,9 @@ def _ParseSysbenchLatency(
         "95th percentile: *([0-9]*[.]?[0-9]+)", sysbench_output.strip()
     )
     return [
-        sample.Sample(f"{workload}_Threads", thread, "", metadata),
+        sample.Sample("Threads", int(thread), "", metadata),
         sample.Sample(
-            f"{workload}_95_Percentile_Latency", percentile_latency, "ms", metadata
+            "p95_latency", percentile_latency, "ms", metadata
         ),
     ]
 
@@ -519,6 +536,8 @@ def GenerateMetadataFromFlags(total_clients, thread_num):
             "sysbench_run_time": RUN_TIME.value,
             "sysbench_tables": TABLE_COUNT.value,
             "sysbench_table_size": TABLE_SIZE.value,
+            "mysql_version": FLAGS.ampere_mysql_version_number,
+            "sysbench_version": FLAGS[f'{PACKAGE_NAME}_git_branch'].value,
         }
     )
     return metadata

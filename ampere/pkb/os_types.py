@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025: Ampere Computing LLC
 # Copyright 2016 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,8 +20,9 @@ ORACLE8 = 'oracle8'
 ORACLE9 = 'oracle9'
 
 
-LINUX_OS_TYPES = [
+LINUX_OS_TYPES_NEW = [
     ORACLE8,
     ORACLE9,
 ]
-os_types.ALL.extend(LINUX_OS_TYPES)
+os_types.ALL.extend(LINUX_OS_TYPES_NEW)
+os_types.LINUX_OS_TYPES.extend(LINUX_OS_TYPES_NEW)

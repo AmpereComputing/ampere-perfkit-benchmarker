@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2020 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +23,8 @@ from six.moves import range
 
 from perfkitbenchmarker import data
 from ampere.pkb.common import download_utils
+from ampere.pkb.common import bashrc_handler
+from ampere.pkb.common import firewall_handler
 
 PACKAGE_NAME = "ampere_mysql"
 BENCHMARK_NAME = "ampere_mysql_sysbench"
@@ -172,15 +174,7 @@ def _Install(vm):
     vm.RemoteCommand(f"mkdir -p {mysql_data_directory}")
     port = MYSQL_PORT.value
     vm.AllowPort(port)
-    # Check if firewalld is installed on system by default
-    stdout, stderr = vm.RemoteCommand(
-            "sudo firewall-cmd --version", ignore_failure=True
-            )
-    if not stderr:
-        vm.RemoteCommand(
-                f"sudo firewall-cmd --zone=public --add-port={port}/tcp --permanent"
-                )
-        vm.RemoteCommand(f"sudo firewall-cmd --reload")
+    firewall_handler.add_port_to_nftables(vm, port)
 
     data_temp = "data" + str(port)
     dbs_temp = "dbs" + str(port)
@@ -260,9 +254,8 @@ def MysqlBuild(vm):
             vm.RemoteCommand(f"cd {download_utils.INSTALL_DIR} && mkdir -p pgo_build;")
             build_path = posixpath.join(download_utils.INSTALL_DIR, "pgo_build")
             compile_flag_value = (
-                compile_flag_value
-                + " -fprofile-use -fprofile-dir=/tmp/pgo_dir "
-                  "-fprofile-correction -Wno-error=missing-profile "
+                compile_flag_value + " -fprofile-use -fprofile-dir=/tmp/pgo_dir "
+                "-fprofile-correction -Wno-error=missing-profile "
             )
     compile_flag_value = compile_flag_value + f"-L{libtirpc_install_dir}/lib -ltirpc"
     os_type, _ = vm.RemoteCommand('cat /etc/os-release  | grep ^ID= | cut -d "=" -f2')
@@ -278,12 +271,16 @@ def MysqlBuild(vm):
             f"cd /opt/rh/gcc-toolset-10/root/usr/lib/gcc/{arch}-redhat-linux/10/plugin "
             f"&& sudo ln -s annobin.so gcc-annobin.so"
         )
-        gcc_value = ("export CC=/opt/rh/gcc-toolset-10/root/usr/bin/gcc "
-                     "&& export CXX=/opt/rh/gcc-toolset-10/root/usr/bin/g++ && ")
-    # Get boost manually to avoid flaky downloads in cmake 
+        gcc_value = (
+            "export CC=/opt/rh/gcc-toolset-10/root/usr/bin/gcc "
+            "&& export CXX=/opt/rh/gcc-toolset-10/root/usr/bin/g++ && "
+        )
+    # Get boost manually to avoid flaky downloads in cmake
     #   - boost_1_77_0 is compatible with MySQL 8.0.36
     boost_basename = "boost_1_77_0"
-    boost_url = f"https://archives.boost.io/release/1.77.0/source/{boost_basename}.tar.bz2"
+    boost_url = (
+        f"https://archives.boost.io/release/1.77.0/source/{boost_basename}.tar.bz2"
+    )
     boost_path = posixpath.join(download_utils.INSTALL_DIR, boost_basename)
     vm.RemoteCommand(f"wget {boost_url} -P {download_utils.INSTALL_DIR}")
     vm.RemoteCommand(f"tar -xvf {boost_path}.tar.bz2 -C {download_utils.INSTALL_DIR}")
@@ -364,16 +361,8 @@ def YumInstall(vm):
         check_patchelf, ignore_failure=True
     )
     if ret_code == 1:
-        vm.RemoteCommand(
-            f"cd {download_utils.INSTALL_DIR} && "
-            f"sudo wget https://www.rpmfind.net/linux/mageia/distrib/8/{arch}/"
-            f"media/core/updates/patchelf-0.16.1-1.mga8.{arch}.rpm"
-        )
-        vm.RemoteCommand(
-            f"cd {download_utils.INSTALL_DIR} && "
-            f"sudo rpm -i patchelf-0.16.1-1.mga8.{arch}.rpm",
-            ignore_failure=True,
-        )
+        vm.InstallPackages("patchelf")
+        
     if "centos" in os_type:
         vm.InstallPackages(
             "pkg-config cmake bison gcc-toolset-10"
@@ -581,3 +570,5 @@ def CleanNode(vm):
     time.sleep(20)
     vm.RemoteCommand(f"sudo rm -rf {download_utils.INSTALL_DIR}")
     vm.RemoteCommand("rm -rf /tmp/pgo_dir")
+    #restore nftables.conf in /etc folder
+    firewall_handler.restore_nftables(vm)

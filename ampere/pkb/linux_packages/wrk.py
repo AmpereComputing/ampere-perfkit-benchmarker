@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2015 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,7 +42,7 @@ LUA_PATH = posixpath.join(WRK_DIR, "obj")
 
 # Rather than parse WRK's free text output, this script is used to generate a
 # CSV report
-_LUA_SCRIPT_NAME = "wrk_latency.lua"
+_LUA_SCRIPT_NAME = "ampere_wrk_latency.lua"
 _LUA_SCRIPT_PATH = posixpath.join(WRK_DIR, _LUA_SCRIPT_NAME)
 
 # WRK always outputs a free text report. _LUA_SCRIPT_NAME (above)
@@ -66,20 +66,8 @@ flags.DEFINE_integer(
     "Comma separated list of number of threads. "
     "Specify more than 1 value to vary the number of threads. ",
 )
-flags.DEFINE_bool(
-    f"{PACKAGE_NAME}_latency_capped_throughput",
-    False,
-    "Measure latency capped throughput. Use in conjunction with "
-    "wrk_latency_cap. Defaults to False. ",
-)
-flags.DEFINE_float(
-    f"{PACKAGE_NAME}_latency_cap",
-    5.0,
-    "Latency cap in ms. Use in conjunction with "
-    "latency_capped_throughput. Defaults to 5ms.",
-)
 WRK_DATA_FILES = flags.DEFINE_string(
-    f"{PACKAGE_NAME}_data", "./perfkitbenchmarker/data/", "Must be in ./perfkitbenchmarker/data/"
+    f"{PACKAGE_NAME}_data", "./ampere/pkb/data/", "Must be in ./ampere/pkb/data/"
 )
 
 
@@ -90,7 +78,11 @@ def _Install(vm):
     vm.RemoteCommand(f"sudo rm -rf {WRK_DIR}")
     vm.RemoteCommand(f"sudo mkdir -p {WRK_DIR} && "
                      f"curl -L {WRK_URL} | sudo tar --strip-components=1 -C {WRK_DIR} -xzf -")
-    vm.RemoteCommand(f"cd {WRK_DIR} && sudo make -j")
+    tar_file = WRK_URL.split('/')[6]
+    version_list = tar_file.split('.')
+    version = version_list[0] + "." + version_list[1] + "." + version_list[2]
+
+    vm.RemoteCommand(f"cd {WRK_DIR} && sudo make VER='{version}' -j")
     vm.PushDataFile(
         data.ResourcePath(posixpath.join(WRK_DATA_FILES.value, _LUA_SCRIPT_NAME)),
         "/tmp/wrk_latency.lua"
@@ -108,7 +100,7 @@ def YumInstall(vm):
         "/tmp/NGINX_TEST_SSL.crt",
     )
     vm.InstallPackages("ca-certificates")
-    vm.RemoteCommand("sudo update-ca-trust force-enable")
+    vm.RemoteCommand("sudo update-ca-trust")
     vm.RemoteCommand(
         "sudo cp /tmp/NGINX_TEST_SSL.crt /etc/pki/ca-trust/source/anchors/"
     )
@@ -133,6 +125,7 @@ def AptInstall(vm):
     _Install(vm)
 
 
+
 def Uninstall(vm):
     """Cleans up Ampere wrk from the target vm.
 
@@ -140,6 +133,10 @@ def Uninstall(vm):
       vm: The vm on which Ampere wrk is uninstalled.
     """
     vm.RemoteCommand(f"sudo rm -rf {WRK_DIR}")
+    vm.RemoteCommand("rm -f /tmp/NGINX_TEST_SSL.crt" 
+                     " /etc/pki/ca-trust/source/anchors/NGINX_TEST_SSL.crt" 
+                     " /usr/local/share/ca-certificates/NGINX_TEST_SSL.crt"
+                     " /tmp/wrk_latency.lua")
 
 
 def RunWithConnectionsAndThreads(
@@ -164,7 +161,8 @@ def RunWithConnectionsAndThreads(
         connections=client_connection,
     )
     metadata = GetMetadata(
-        client_num=client_number, threads=client_thread, connections=client_connection
+        client_vm=client_vm, client_num=client_number, 
+        threads=client_thread, connections=client_connection
     )
     samples.extend(results.GetSamples(metadata))
     return samples
@@ -207,11 +205,20 @@ def _Run(vm, client_number, target, threads, connections) -> "WrkResult":
         summary_data = output.read()
     return WrkResult.Parse(summary_data)
 
+def GetWrkVersion(client_vm) -> str:
+    version, _ = client_vm.RemoteCommand(f'{WRK_PATH} -v | head -1 | cut -d" " -f2,3')
+    version = version.strip()
+    return version
 
-def GetMetadata(client_num: int, threads: int, connections: int) -> Dict[str, Any]:
+def GetMetadata(client_vm, client_num: int, threads: int, connections: int) -> Dict[str, Any]:
     """Metadata for Wrk test."""
-    meta = {"client_number": client_num, "connections": connections, "threads": threads}
-    return meta
+    return {
+            "wrk_version": GetWrkVersion(client_vm),
+            "client_number": client_num, 
+            "connections": connections, 
+            "threads": threads, 
+            "duration": FLAGS[f"{PACKAGE_NAME}_duration"].value
+            }
 
 
 @dataclasses.dataclass

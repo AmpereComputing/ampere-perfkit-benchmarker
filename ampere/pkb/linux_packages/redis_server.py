@@ -1,4 +1,4 @@
-# Modifications Copyright (c) 2024 Ampere Computing LLC
+# Modifications Copyright (c) 2024-2025 Ampere Computing LLC
 # Copyright 2014 PerfKitBenchmarker Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,6 +37,9 @@ class RedisEvictionPolicy:
     VOLATILE_RANDOM = "volatile-random"
     VOLATILE_TTL = "volatile-ttl"
 
+_GIT_REPOSITORY_URL = flags.DEFINE_string(
+    f"{PACKAGE_NAME}_git_url", "https://github.com/redis/redis", "Version of redis server to use."
+)
 
 _VERSION = flags.DEFINE_string(
     f"{PACKAGE_NAME}_version", "7.2.0", "Version of redis server to use."
@@ -110,7 +113,6 @@ _ENABLE_THP = flags.DEFINE_bool(
 _DEFAULT_PORT = 6379
 REDIS_PID_FILE = "redis.pid"
 FLAGS = flags.FLAGS
-REDIS_GIT = "https://github.com/antirez/redis.git"
 REDIS_BACKUP = "redis_backup"
 
 
@@ -127,7 +129,7 @@ def _Install(vm) -> None:
     vm.Install("build_tools")
     vm.Install("wget")
     vm.InstallPackages("numactl")
-    vm.RemoteCommand(f"cd {download_utils.INSTALL_DIR}; git clone {REDIS_GIT}")
+    vm.RemoteCommand(f"cd {download_utils.INSTALL_DIR}; git clone {_GIT_REPOSITORY_URL.value}")
     vm.RemoteCommand(
         f'cd {GetRedisDir()} && git checkout {_VERSION.value} && make -j CFLAGS="-O3 -march=native"'
     )
