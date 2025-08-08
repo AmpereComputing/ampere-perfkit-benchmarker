@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Ampere Computing LLC
+# Copyright (c) 2024-2025, Ampere Computing LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,14 +56,20 @@ def before_phase(sender: Any, benchmark_spec: BenchmarkSpec):
     if not FLAGS.ampere_baremetal_disk:
         return
     if sender == stages.TEARDOWN and FLAGS.ampere_remove_disk:
-        server_vm = benchmark_spec.vm_groups["servers"][0]
+        if "default" in benchmark_spec.vm_groups:
+            server_vm = benchmark_spec.vm_groups["default"][0]
+        else:
+            server_vm = benchmark_spec.vm_groups["servers"][0]
         return perform_disk_umount(server_vm)
 
 def after_phase(sender: Any, benchmark_spec: BenchmarkSpec):
     if not FLAGS.ampere_baremetal_disk:
         return
     if sender == stages.PROVISION:
-        server_vm = benchmark_spec.vm_groups["servers"][0]
+        if "default" in benchmark_spec.vm_groups:
+            server_vm = benchmark_spec.vm_groups["default"][0]
+        else:
+            server_vm = benchmark_spec.vm_groups["servers"][0]
         return perform_disk_mount(server_vm)
 
 

@@ -87,7 +87,7 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
         if flag_values["oci_network_type"].present:
             config_values["oci_network_type"] = flag_values.oci_network_type
         if flag_values["oci_enable_firewall"].present:
-            config_values["oci_enable_firewall"] = flag_values.oci_enable_firewall
+            config_values["oci_enable_firewall"] = flag_values.oci_enable_firewall            
         if flag_values["oci_profile"].present:
             config_values["oci_profile"] = flag_values.oci_profile
 
@@ -120,7 +120,7 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
                 "region": (option_decoders.StringDecoder, {"default": None}),
                 "oci_network_name": (option_decoders.StringDecoder, {"default": None}),
                 "oci_network_type": (option_decoders.StringDecoder, {"default": "PARAVIRTUALIZED"}),
-                "oci_enable_firewall": (option_decoders.BooleanDecoder, {"default": True}),
+                "oci_enable_firewall": (option_decoders.BooleanDecoder, {"default": True}),                
                 "oci_profile": (option_decoders.StringDecoder, {"default": "DEFAULT"}),
             }
         )
@@ -366,7 +366,7 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
         self.firewall.AllowPort(self, start_port=1, end_port=65535, source_range="172.16.0.0/16")
         self.firewall.AllowIcmp(self, source_range="172.16.0.0/16")
         self.firewall.AllowIcmp(self)
-
+        
 
 class Ubuntu2404BasedOCIVirtualMachine(
     OciVirtualMachine, linux_virtual_machine.Ubuntu2404Mixin
