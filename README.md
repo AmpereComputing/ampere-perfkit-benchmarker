@@ -2,7 +2,7 @@
 
 Ampere Performance Toolkit (APT) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
 
-- APT Version: 2.0.1
+- APT Version: 2.1.0
 - Upstream Google PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
 
 Features Added
@@ -18,12 +18,15 @@ Features Added
   - SPECint: characterize compute performance
   - Netperf: network performance, optimization and troubleshooting
   - FIO: evaluate I/O characteristics
+- Support for inference benchmarking of large language models (LLaMA, Qwen, etc.)
+- Support for docker daemon installation, docker image creation/pull, and container management 
 
 In summary, APT is great at capturing all workload parameters and system-under-test parameters in a single, re-playable,
 yaml file.
 
 - See [Contribution Guide](ampere/pkb/docs/CONTRIBUTING.md) for issues, features requests, and questions 
 - See [Guides](ampere/pkb/docs/guides) for various guides, tips, and tricks
+- See [CHANGELOG](CHANGELOG.md) for an exhaustive list of changes, bugfixes, and features
 
 # Licensing
 
