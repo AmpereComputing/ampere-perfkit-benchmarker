@@ -1,0 +1,47 @@
+# Use this config:
+#   - ./pkb.py --benchmarks=ampere_llama_benchmark --benchmark_config_file=/path/to/this/config
+# To view available flags:
+#   - ./pkb.py --helpmatch=ampere | grep -A 2 llama
+
+static_vms:
+  - &server
+    ip_address: <>
+    user_name: <>
+    ssh_private_key: <>
+    os_type: <>
+
+vm_groups: &baremetal_group
+  servers:
+    static_vms:
+      - *server
+
+ampere_llama_benchmark:
+  vm_groups: *baremetal_group
+  flags:
+    #For Ampere llama model
+    ampere_llama_benchmark_model_names: [ "llama-3.1-8B-Q8R16.gguf" ]
+    ampere_llama_models_url: 'http://ampereaimodelzoo.s3.eu-central-1.amazonaws.com/gguf/'
+
+    # to use an existing Llama image
+    ampere_docker_image: 'llama.cpp'
+    ampere_docker_image_repo: 'amperecomputingai'
+    ampere_docker_image_version: '3.2.1-ampereone'
+
+    ampere_docker_volume_names: ['/opt/pkb/models', '/opt/pkb/run_llama.py', '/opt/pkb/out_dir']
+    ampere_docker_volume_mountpoints: ['/models/', '/utils/benchmark.py','/out_dir/']
+    ampere_docker_name: 'llama_container'
+    ampere_docker_daemon: True
+    ampere_docker_privileged_docker: True
+    ampere_docker_bash_command: '--entrypoint /bin/sh -it'
+    ampere_llama_benchmark_llama_exe_path: '/llm'
+    ampere_llama_benchmark_threads_per_process: [6]
+    ampere_llama_benchmark_batch_size: [1,16]
+    ampere_llama_benchmark_prompt_size: [512]
+    ampere_llama_benchmark_threads_range: '0-191'
+    ampere_llama_benchmark_timeout: 300.0
+
+flags:
+  ampere_tune_global: []
+  ampere_tune_servers: [
+    "echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled",
+    "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"]

@@ -14,3 +14,7 @@
 
 from .oracle8 import Oracle8Mixin, Oracle8BasedStaticVirtualMachine
 from .oracle9 import Oracle9Mixin, Oracle9BasedStaticVirtualMachine
+from .fedora39 import Fedora39Mixin, Fedora39BasedStaticVirtualMachine
+from .fedora40 import Fedora40Mixin, Fedora40BasedStaticVirtualMachine
+from .fedora41 import Fedora41Mixin, Fedora41BasedStaticVirtualMachine
+from .fedora42 import Fedora42Mixin, Fedora42BasedStaticVirtualMachine

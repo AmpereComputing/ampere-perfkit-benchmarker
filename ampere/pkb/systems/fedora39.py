@@ -1,5 +1,4 @@
-# Modifications Copyright (c) 2024-2025: Ampere Computing LLC
-# Copyright 2016 PerfKitBenchmarker Authors. All rights reserved.
+# Copyright (c) 2025, Ampere Computing LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,24 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from perfkitbenchmarker import os_types
+from perfkitbenchmarker.linux_virtual_machine import Fedora37Mixin
+from perfkitbenchmarker.static_virtual_machine import StaticVirtualMachine
+
+from ampere.pkb import os_types
 
 
-ORACLE8 = 'oracle8'
-ORACLE9 = 'oracle9'
-FEDORA39 = 'fedora39'
-FEDORA40 = 'fedora40'
-FEDORA41 = 'fedora41'
-FEDORA42 = 'fedora42'
+class Fedora39Mixin(Fedora37Mixin):
+    """Re-use Fedora37Mixin"""
+    OS_TYPE = os_types.FEDORA39
 
 
-LINUX_OS_TYPES_NEW = [
-    ORACLE8,
-    ORACLE9,
-    FEDORA39,
-    FEDORA40,
-    FEDORA41,
-    FEDORA42
-]
-os_types.ALL.extend(LINUX_OS_TYPES_NEW)
-os_types.LINUX_OS_TYPES.extend(LINUX_OS_TYPES_NEW)
+class Fedora39BasedStaticVirtualMachine(StaticVirtualMachine,
+                                        Fedora39Mixin):
+    pass
