@@ -157,22 +157,35 @@ flags.DEFINE_boolean(
 )
 flags.DEFINE_string(f"{PACKAGE_NAME}_bash_command", None, "sets bash command")
 
-
 def Install(vm):
-    """Installs the docker image for self.name on the VM."""
+    """Installs the docker on the VM."""
     # install docker package
     vm.Install("build_tools")
     vm.InstallPackages("numactl")
-    # sometimes Error on fedora38
-    _, _, return_code = vm.RemoteCommandWithReturnCode(
-        "sudo curl -fsSL https://get.docker.com -o get-docker.sh && "
-        "sudo sh get-docker.sh"
-    )
-    if return_code > 0:
-        vm.Install("docker")
-    vm.RemoteCommand("sudo systemctl start docker")
+    os_type = vm.os_info
+    version, _, _ = vm.RemoteCommandWithReturnCode("docker --version",ignore_failure=True)
+    version = version.strip()
+    if "Docker version" in version:
+        logging.info(f"{version} is already installed")
+    else:
+        if "Oracle" in os_type:
+            vm.RemoteCommand("sudo dnf update -y;sudo dnf install -y dnf-plugins-core;")
+            vm.RemoteCommand("sudo dnf config-manager --add-repo "
+                             "https://download.docker.com/linux/centos/docker-ce.repo;")
+            vm.InstallPackages("docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin")
+            logging.info("Docker is installed using Oracle9 repo for docker")
+        else:
+            _, err = vm.RemoteCommand("sudo curl -fsSL https://get.docker.com -o get-docker.sh && "
+                                      "sudo sh get-docker.sh"
+                                      )
+            if err:
+                vm.Install("docker")
+                logging.info("Docker is installed using docker package")
+            else:
+                logging.info("Docker is installed using docker script")
+    #on some os docker service needs to be enabled explicitely after starting 
+    vm.RemoteCommand("sudo systemctl start docker;sudo systemctl enable docker;")
     clean_existing_containers(vm)
-
 
 def validate_docker_flags():
     if FLAGS[f"{PACKAGE_NAME}_build_docker_dir"].value:
@@ -184,13 +197,13 @@ def validate_docker_flags():
             )
         if not FLAGS[f"{PACKAGE_NAME}_build_docker_image"].value:
             raise errors.Setup.InvalidSetupError(
-                    f"ampere_docker_build_docker_image is not specified for"
+                    "ampere_docker_build_docker_image is not specified for"
                     f" {dockerfile} from {directory}")
     else:
         if not FLAGS[f"{PACKAGE_NAME}_image"].value:
             raise errors.Setup.InvalidSetupError(
-                    f"ampere_docker_image flag is not specified for"
-                    f" pulling docker")
+                    "ampere_docker_image flag is not specified for"
+                    " pulling docker")
         
     if FLAGS[f"{PACKAGE_NAME}_volume_names"].value:
         if len(FLAGS[f"{PACKAGE_NAME}_volume_names"].value) != len(
@@ -459,21 +472,18 @@ def _docker_exists(vm):
 
 
 def clean_existing_containers(vm):
-    """stops docker container on vm 
+    """stops docker container on vm
     Args:
       vm: The vm on which Ampere docker is uninstalled.
     """
-    docker_image = _get_docker_image()
-    if docker_image:
-        out, err, return_code = vm.RemoteCommandWithReturnCode("sudo docker ps -a | wc -l")
-        print(out, err, return_code)
-        if int(out) > 1:
-            if FLAGS[f"{PACKAGE_NAME}_name"].value:
-                container_name = FLAGS[f"{PACKAGE_NAME}_name"].value
-                info, out, return_code = _get_container_info(vm, container_name)
-                if return_code == 0:
-                    vm.RemoteCommand(f"sudo docker stop {container_name}")
-                    vm.RemoteCommand(f"sudo docker rm -f {container_name}")    
+    container_name = FLAGS[f"{PACKAGE_NAME}_name"].value
+    if container_name:
+        out, err, return_code = vm.RemoteCommandWithReturnCode(
+                f"sudo docker ps -a | grep {container_name}",ignore_failure=True)
+        if return_code == 0:
+            logging.info(f"stdout and stderr in clean_existing_containers: {out}, {err}")
+            vm.RemoteCommand(f"sudo docker stop {container_name}",ignore_failure=True)
+            vm.RemoteCommand(f"sudo docker rm -f {container_name}",ignore_failure=True)
 
 
 def Uninstall(vm):
@@ -483,7 +493,7 @@ def Uninstall(vm):
       vm: The vm on which Ampere docker is uninstalled.
     """
     out, err, return_code = vm.RemoteCommandWithReturnCode("sudo docker ps -a -q")
-    print(out, err, return_code)
+    logging.info(f"Uninstalling docker: {out}, {err}, {return_code}")
     if err == "":
         vm.RemoteCommand("sudo docker stop $(sudo docker ps -a -q)")
         vm.RemoteCommand("sudo docker rm -f $(sudo docker ps -a -q)")

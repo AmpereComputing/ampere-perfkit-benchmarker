@@ -611,7 +611,7 @@ def _run(vm):
                         if FLAGS[f"{BENCHMARK_NAME}_stability"].value:
                             cmd += " --stability"
                         if FLAGS[f"{BENCHMARK_NAME}_flash_attention"].value:
-                            cmd += " -fa"
+                            cmd += " -fa 1"
                         FLAGS[f"{docker_package.PACKAGE_NAME}_shell_type"].value = (
                             "bash"
                         )
