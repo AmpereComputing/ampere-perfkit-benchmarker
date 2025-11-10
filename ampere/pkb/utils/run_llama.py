@@ -95,7 +95,9 @@ def parse_args():
     parser.add_argument(
         "--stability", action="store_true", help="run till the result is stable"
     )
-    parser.add_argument("-fa", action="store_true", help="enable flash attention")
+    parser.add_argument(
+        "-fa", type=int, default=0, choices=range(0, 2), help="enable flash attention"
+    )
     return parser.parse_args()
 
 
@@ -219,8 +221,13 @@ def main():
             str(args.num_threads),
             "--no-mmap"
         ]
-        if args.fa:
+        if args.fa != 0:
             cmd.append("-fa")
+            cmd.append("on")
+        else:
+            cmd.append("-fa")
+            cmd.append("off")
+
         current_subprocesses.append(
             subprocess.Popen(
                 cmd, stdout=open(logfile, "wb"), stderr=open(logfile, "wb")
