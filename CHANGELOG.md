@@ -23,14 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -   `bashrc_handler`: ensures modular code and replaces repeated functions throughout the namespace
 -   `ampere_find_jdk`: captures jdk version in `*results.json`
--   `setup.sh`: new convenience script helps automate APT setup for new users
+-   `setup.sh`: new convenience script helps automate APKB setup for new users
 -   `sysbench`: can now pin to specified core range
  
 ### Changed
 
 -   Upstream PKB upstream removed a `wrk` file, this has been moved back to the ampere namespace and modified to report p95 latency
 -   `download_utils`: changed to ensure the same utility functions are used to download files/resources (be it `wget`, `git clone` or from `gsutil`)
--   `provision_disk`: modified such that the upstream .yml files work with APT in cases when the vm group specified is `default`
+-   `provision_disk`: modified such that the upstream .yml files work with APKB in cases when the vm group specified is `default`
 -   Changes related to unifying reported metrics and modes: 
     - Throughput modes are now standardized and always called as `{BENCHMARK_NAME}_throughput_mode` across all benchmarks
     - All outputs are now now standardized and called `p95_latency` or `<unit>_performance`

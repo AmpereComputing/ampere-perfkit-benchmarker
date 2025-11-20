@@ -1,14 +1,14 @@
-# Ampere Performance Toolkit
+# Ampere Perfkit Benchmarker
 
-Ampere Performance Toolkit (APT) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
+Ampere Perfkit Benchmarker (APKB) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
 
-- APT Version: 2.1.1
+- APKB Version: 2.1.1
 - Upstream Google PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
 
 Features Added
 
 - Oracle Cloud Infrastructure (OCI) support as a provider
-    - APT can automatically provision/cleanup VMs, VCNs, etc. through OCI for workload runs
+    - APKB can automatically provision/cleanup VMs, VCNs, etc. through OCI for workload runs
 - Additional support for BareMetal testing
 - IRQ binding for experimentation with network intensive workloads
 - A global tuning module that enables declarative bash commands from yaml configs on all systems involved in a test
@@ -21,7 +21,7 @@ Features Added
 - Support for inference benchmarking of large language models (LLaMA, Qwen, etc.)
 - Support for docker daemon installation, docker image creation/pull, and container management 
 
-In summary, APT is great at capturing all workload parameters and system-under-test parameters in a single, re-playable,
+In summary, APKB is great at capturing all workload parameters and system-under-test parameters in a single, re-playable,
 yaml file.
 
 - See [Contribution Guide](ampere/pkb/docs/CONTRIBUTING.md) for issues, features requests, and questions 
@@ -30,7 +30,7 @@ yaml file.
 
 # Licensing
 
-Ampere Performance Toolkit provides wrappers and workload definitions around popular
+Ampere Perfkit Benchmarker provides wrappers and workload definitions around popular
 benchmark tools. We made it very simple to use and automate everything we can.
 It instantiates VMs on the Cloud provider of your choice, automatically installs
 benchmarks, and runs the workloads without user interaction.
@@ -38,7 +38,7 @@ benchmarks, and runs the workloads without user interaction.
 Due to the level of automation you will not see prompts for software installed
 as part of a benchmark run. Therefore you must accept the license of each of the
 benchmarks individually, and take responsibility for using them before you use
-the Ampere Performance Toolkit. 
+the Ampere Perfkit Benchmarker. 
 
 In its current release these are the benchmarks that are executed and their associated license terms:
 
@@ -54,15 +54,15 @@ In its current release these are the benchmarks that are executed and their asso
 - `wrk`: [Apache v2](https://github.com/wg/wrk/blob/master/LICENSE)
 - `multichase`: [Apache v2](https://github.com/google/multichase/blob/master/LICENSE)
 
-# APT: Overview, Setup, and Usage
+# APKB: Overview, Setup, and Usage
 
 ## Overview
 
-APT runs on a separate system from the system-under-test (SUT), and sends commands over SSH to the SUT to perform benchmarks. The steps in this guide will help to prepare a new APT runner system.
+APKB runs on a separate system from the system-under-test (SUT), and sends commands over SSH to the SUT to perform benchmarks. The steps in this guide will help to prepare a new APKB runner system.
 
 ### Test Topology
 
-A minimum of 2+ systems is required for APT. 
+A minimum of 2+ systems is required for APKB. 
 
 The simplest configuration would consist of one runner system and one system-under-test (SUT) for single-node tests. 
 
@@ -96,12 +96,12 @@ clients<-.->server
 - Firewall disabled between SUT and Client(s)
 
 *For Cloud-based Tests*
-- APT will automatically create the system(s) and SSH keys required for connection under the hood (given a valid cloud YAML config) 
+- APKB will automatically create the system(s) and SSH keys required for connection under the hood (given a valid cloud YAML config) 
 
 
 ## Dependencies
 
-APT requires Python 3.11 and above, pip for package management, and a virtual environment for dependencies. Check the current version on your runner system with `python3 --version`. 
+APKB requires Python 3.11 and above, pip for package management, and a virtual environment for dependencies. Check the current version on your runner system with `python3 --version`. 
 
 If the system does not already have Python 3.11 or higher, install it explicitly, e.g. *Fedora 38*
 
@@ -109,7 +109,7 @@ If the system does not already have Python 3.11 or higher, install it explicitly
 sudo dnf install python3.11
 ```
 
-## Setup APT with setup.sh
+## Setup APKB with setup.sh
 
 The setup script will
 - Determine/detect if Python 3.11.x is installed
@@ -121,7 +121,7 @@ The setup script will
 source setup.sh
 ```
 
-## Setup APT manually
+## Setup APKB manually
 
 **Note**: The following steps are *not* required if you have used the setup script above.
 
@@ -143,7 +143,7 @@ Upgrade pip inside virtual environment (important)
 python3.11 -m pip install --upgrade pip
 ```
 
-Clone the Ampere Performance Toolkit (APT) repository 
+Clone the Ampere Perfkit Benchmarker (APKB) repository 
 
 Next, `cd` into the root of project directory
 
@@ -165,7 +165,7 @@ flowchart LR
 Provision -->Prepare-->Run-->Cleanup-->Teardown
 ```
 
-To initiate all phases, simply call APT with the workload and config of your choice. Run from the root of the project directory and be sure the virtual envirnoment is active.
+To initiate all phases, simply call APKB with the workload and config of your choice. Run from the root of the project directory and be sure the virtual envirnoment is active.
 
 ```bash
 ./pkb.py --benchmarks=<benchmark_name> --benchmark_config_file=<path_to_config>
