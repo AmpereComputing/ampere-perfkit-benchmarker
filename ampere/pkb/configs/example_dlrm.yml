@@ -1,0 +1,60 @@
+# Copyright (c) 2025, Ampere Computing LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Use this config:
+#   - ./pkb.py --benchmarks=ampere_pytorch_dlrm --benchmark_config_file=/path/to/this/config
+# To view available flags:
+#   - ./pkb.py --helpmatch=ampere | grep -A 2 dlrm
+
+static_vms:
+  - &server
+    ip_address: <>
+    user_name: <>
+    ssh_private_key: <>
+    os_type: <>
+
+vm_groups: &baremetal_group
+  servers:
+    static_vms:
+      - *server
+
+ampere_pytorch_dlrm:
+  vm_groups: *baremetal_group
+  flags:
+    ampere_pytorch_dlrm_aml_dir: "/workspace/ampere_model_library"
+    ampere_docker_image: 'pytorch'
+    #### pull existing image
+    ampere_docker_image_repo: 'amperecomputingai'
+    ampere_docker_image_version: '1.12.1'
+    #####
+    ampere_docker_name: 'torch'
+    ampere_docker_daemon: True
+    #memory can be set as 95% total memory available on vm
+    ampere_docker_use_memory: 450
+    ampere_docker_privileged_docker: True
+    ampere_docker_bash_command: '--entrypoint /bin/sh -it'
+    ampere_pytorch_dlrm_threads_per_process: [8]
+    ampere_pytorch_dlrm_batch_size: [256]
+    ampere_pytorch_dlrm_threads_range: '0-191'
+    ampere_pytorch_dlrm_precision: "fp16"
+    ampere_pytorch_dlrm_duration: 90
+    ampere_pytorch_dlrm_sleep_duration: 20
+flags:
+  ampere_tune_servers: [
+    "echo 3 | tee /proc/sys/vm/drop_caches",
+    "cpupower frequency-set --governor performance",
+    "echo always | tee /sys/kernel/mm/transparent_hugepage/enabled",
+    "echo 0 | tee /proc/sys/vm/compaction_proactiveness",
+    "echo 1 | tee /proc/sys/vm/compact_memory"
+    ]
