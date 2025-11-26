@@ -2,7 +2,7 @@
 
 Ampere Perfkit Benchmarker (APKB) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
 
-- APKB Version: 2.1.1
+- APKB Version: 2.2.0
 - Upstream Google PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
 
 Features Added
