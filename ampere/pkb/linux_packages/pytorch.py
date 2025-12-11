@@ -25,7 +25,6 @@ from ampere.pkb.common import download_utils
 from ampere.pkb.linux_packages import docker as docker_package
 
 PACKAGE_NAME = "ampere_pytorch"
-BENCHMARK_NAME = "ampere_dlrm_benchmark"
 
 INSTALL_DIR = download_utils.INSTALL_DIR
 
@@ -99,7 +98,8 @@ def Install(vm):
     cmd_exec_installs += "bash ampere_model_library/setup_ampere_aml.sh && "
     cmd_exec_installs += "source ampere_model_library/set_env_variables.sh && "
     cmd_exec_installs += "PYTHONPATH=$(pwd) && sleep 1 && "
-    cmd_exec_installs += "pip3 install --break-system-packages python-Levenshtein O365 || pip3 install python-Levenshtein O365 flake8 urlextract "
+    cmd_exec_installs += "pip3 install --break-system-packages python-Levenshtein O365 || "
+    cmd_exec_installs += "pip3 install python-Levenshtein O365 flake8 urlextract "
     # exec into docker to setup AML
     FLAGS[f"{docker_package.PACKAGE_NAME}_shell_type"].value = "bash"
     FLAGS[f"{docker_package.PACKAGE_NAME}_exec_command"].value = cmd_exec_installs
@@ -108,7 +108,7 @@ def Install(vm):
 
 def set_flags(vm):
     """checking and setting default values for pytorch docker flags"""
-    utils_benchmark_file = "ampere/pkb/utils/run_dlrm.py"
+    utils_benchmark_file = "ampere/pkb/utils/run_aml.py"
     utils_setup_file = "ampere/pkb/utils/setup_ampere_aml.sh"
     utils_setup_pytorch = "ampere/pkb/utils/install_pytorch.py"
     vm.RemoteCopy(utils_benchmark_file, download_utils.INSTALL_DIR)
@@ -118,14 +118,14 @@ def set_flags(vm):
     vm.RemoteCommand(f"mkdir -p {output_dir}")
     if not FLAGS[f"{docker_package.PACKAGE_NAME}_volume_names"].value:
         FLAGS[f"{docker_package.PACKAGE_NAME}_volume_names"].value = [
-            f"{download_utils.INSTALL_DIR}/run_dlrm.py",
+            f"{download_utils.INSTALL_DIR}/run_aml.py",
             output_dir,
             f"{download_utils.INSTALL_DIR}/setup_ampere_aml.sh",
             f"{download_utils.INSTALL_DIR}/install_pytorch.py"
         ]
     if not FLAGS[f"{docker_package.PACKAGE_NAME}_volume_mountpoints"].value:
         FLAGS[f"{docker_package.PACKAGE_NAME}_volume_mountpoints"].value = [
-            "/workspace/benchmark_pytorch_dlrm.py",
+            "/workspace/benchmark_pytorch_models.py",
             "/out_dir/",
             "/workspace/setup_ampere_aml.sh",
             "/workspace/install_pytorch.py"
