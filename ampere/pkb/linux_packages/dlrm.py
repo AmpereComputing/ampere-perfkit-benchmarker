@@ -36,64 +36,6 @@ OUT_DIR = 1
 FLAGS = flags.FLAGS
 
 
-def parse_threads_range(threads_range: str) -> list[int]:
-    """
-    Parses a thread range string into a list of individual thread indices.
-
-    Args:
-        threads_range (str): A string specifying thread index ranges.
-
-    Returns:
-        list[int]: A list of individual thread indices.
-    """
-
-    logging.info("threads_range: %s", threads_range)
-    threads_range = [s.split("-") for s in threads_range.split(",")]
-    logging.info("threads_range: %s", threads_range)
-    if not all(len(s) == 2 for s in threads_range):
-        raise ValueError(
-            "Format of --threads_range argument must be '{idx}-{idx},{idx}-{idx},...', "
-            "e.g. '88-88' to use just thread idx 88"
-        )
-    designated_threads = []
-    for s in threads_range:
-        s_0, s_1 = int(s[0]), int(s[1])
-        if s_1 < s_0:
-            raise ValueError(
-                f"Range {s_0}-{s_1} is not valid, second value has to be equal to or"
-                "greater than the first value"
-            )
-        designated_threads += list(range(s_0, s_1 + 1))
-    logging.info("designated_threads: %s", designated_threads)
-    return designated_threads
-
-
-def check_threads_validity():
-    """
-    Validates the requested thread count against available threads.
-
-    This function checks if the number of threads specified in the benchmark
-    configuration (through `threads_range` and `threads_per_process`) does not
-    exceed the available threads after parsing the `threads_range` argument.
-    If the requested number of threads exceeds the available ones, a
-    `ValueError` is raised.
-
-    It accesses the global flags to get the `threads_range` and `threads_per_process`
-    values, parses the thread range, and then compares the total available threads
-    with the requested threads per process.
-
-    """
-
-    threads_range = FLAGS[f"{BENCHMARK_NAME}_threads_range"].value
-    threads_per_proc_list = FLAGS[f"{BENCHMARK_NAME}_threads_per_process"].value
-    available_threads_list = parse_threads_range(threads_range)
-    if len(available_threads_list) < max(threads_per_proc_list):
-        raise ValueError(
-            f"Requested number of threads ({max(threads_per_proc_list)})"
-            f"exceeds threads available ({len(available_threads_list)})"
-        )
-
-
 
 @dataclasses.dataclass
 class DLRMResult:

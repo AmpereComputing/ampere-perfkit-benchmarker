@@ -13,14 +13,14 @@
 # limitations under the License.
 
 """
-Module containing functions to run dlrm
+Module containing functions to run sla mode for dlrm, resnet (models using pytorch framework)
 
 """
 import logging
 from absl import flags
 from perfkitbenchmarker.virtual_machine import VirtualMachine
 from ampere.pkb.common import download_utils
-from ampere.pkb.utils import dlrm_base_utils
+from ampere.pkb.utils import pytorch_base_utils
 
 FLAGS = flags.FLAGS
 
@@ -29,14 +29,14 @@ INSTALL_DIR = download_utils.INSTALL_DIR
 
 class SlaRunModel:
     """
-    Run DLRM model for SLA
+    Run DLRM , Resnet50 model for SLA
     """
 
     benchmark: str
     model: str
     vm: VirtualMachine
     aml_dir: str
-    sla: int
+    sla: float
 
     def __init__(self, expt_details: dict):
         """
@@ -50,7 +50,7 @@ class SlaRunModel:
 
     def max_throughput_under_sla(self, metadata: {}):
         """
-        Executes DLRM for Maximum throughput under SLA
+        Executes DLRM, Resnet50 for Maximum throughput under SLA
 
         Args:
             vm (BaseVirtualMachine): The target virtual machine where the Docker container runs.
@@ -58,11 +58,11 @@ class SlaRunModel:
 
         """
         # call warm up function
-        cmd_dict_common = dlrm_base_utils.DlrmRunModel.common_flags(self)
-        dlrm_base_utils.DlrmRunModel.warm_up_dlrm(self, cmd_dict_common)
+        cmd_dict_common = pytorch_base_utils.PytorchRunModel.common_flags(self)
+        pytorch_base_utils.PytorchRunModel.warm_up_pytorch_model(self, cmd_dict_common)
         num_cores = self.vm.NumCpusForBenchmark()
-        max_tpt = None
-        p99_latency = None
+        max_tpt = 0.0
+        p99_latency = 0.0
         final_max_result = []
         thread_range = [i for i in range(1, num_cores + 1) if num_cores % i == 0]
         for thread in thread_range:
@@ -79,7 +79,7 @@ class SlaRunModel:
                 logging.info("An unexpected error occurred: %s", e)
             if results_data is not None:
                 max_tpt = results_data.results[0][3]
-                p99_latency = results_data.results[0][4]
+                p99_latency = results_data.results[0][5]
                 if p99_latency < self.sla:
                     (
                         best_batch_size,
@@ -102,7 +102,7 @@ class SlaRunModel:
                         }
                     )
         get_max_data = None
-        logging.info("final_max_result",final_max_result)
+        logging.info(f"final_max_result {final_max_result}")
         if final_max_result:
             get_max_data = max(final_max_result, key=lambda x: float(x["max_tpt"]))
         return get_max_data
@@ -115,11 +115,11 @@ class SlaRunModel:
         Output:
             -Binary search result
         """
-        best_max_tpt = None
-        best_p90_latency = None
-        best_p99_latency = None
-        best_p999_latency = None
-        best_batch_size = None
+        best_max_tpt = 0.0
+        best_p90_latency = 0.0
+        best_p99_latency = 0.0
+        best_p999_latency = 0.0
+        best_batch_size = 0
         batch_size_upper_bound = FLAGS[f"{self.benchmark}_batch_size_upper_bound"].value
         batch_size_lower_bound = FLAGS[f"{self.benchmark}_batch_size_lower_bound"].value
         while batch_size_lower_bound <= batch_size_upper_bound:
@@ -160,7 +160,7 @@ class SlaRunModel:
     def run_pytorch_command(self, batch_size, thread, process, metadata):
         """First run for SLA with lower bound"""
         results_data = []
-        cmd_dict_common = dlrm_base_utils.DlrmRunModel.common_flags(self)
+        cmd_dict_common = pytorch_base_utils.PytorchRunModel.common_flags(self)
         cmd_dict = {
             "batch_size": batch_size,
             "num_threads": thread,
@@ -169,7 +169,7 @@ class SlaRunModel:
             "metadata": metadata,
         }
         try:
-            results_data = dlrm_base_utils.DlrmRunModel.run_pytorch_command(
+            results_data = pytorch_base_utils.PytorchRunModel.run_pytorch_command(
                 self, cmd_dict, cmd_dict_common
             )
         except Exception as e:
