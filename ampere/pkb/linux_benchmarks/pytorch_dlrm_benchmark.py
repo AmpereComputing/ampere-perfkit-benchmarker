@@ -30,7 +30,7 @@ from perfkitbenchmarker import configs
 from ampere.pkb.common import download_utils
 from ampere.pkb.linux_packages import pytorch
 from ampere.pkb.linux_packages import dlrm
-from ampere.pkb.utils import dlrm_base_utils
+from ampere.pkb.utils import pytorch_base_utils
 from ampere.pkb.utils import pytorch_model_sla
 
 BENCHMARK_NAME = "ampere_pytorch_dlrm"
@@ -49,7 +49,10 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string(
     f"{BENCHMARK_NAME}_util_path", None, "path to benchmark.py file inside the docker"
 )
-
+flags.DEFINE_string(
+    f"{BENCHMARK_NAME}_runner_path", "recommendation/dlrm_torchbench/run.py"
+    , "path to resnet run.py file inside the docker"
+)
 aml_dir = flags.DEFINE_string(
     f"{BENCHMARK_NAME}_aml_dir", None, "dir to Ampere model library in docker"
 )
@@ -57,7 +60,8 @@ aml_dir = flags.DEFINE_string(
 threads_per_process_list = flags.DEFINE_list(
     f"{BENCHMARK_NAME}_threads_per_process", [8, 16], "number of threads to use"
 )
-
+flags.DEFINE_integer(f"{BENCHMARK_NAME}_number_of_models", 0,
+                     "number of models/processes to run in parallel")
 batch_sizes_list = flags.DEFINE_list(
     f"{BENCHMARK_NAME}_batch_size", [512, 1024], "batch sizes to cover"
 )
@@ -147,9 +151,9 @@ def Prepare(benchmark_spec):
     """
 
     server = benchmark_spec.vm_groups["servers"][0]
-    dlrm.check_threads_validity()
+    pytorch_base_utils.check_threads_validity(BENCHMARK_NAME)
     pytorch.Install(server)
-    dlrm_base_utils.validate()
+    pytorch_base_utils.validate()
 
 
 def Run(benchmark_spec):
@@ -207,8 +211,8 @@ def Run(benchmark_spec):
             "vm": vm,
             "aml_dir": aml_dir,
         }
-        dlrm_base = dlrm_base_utils.DlrmRunModel(expt_dict)
-        dlrm_base.run_dlrm_model(
+        dlrm_base = pytorch_base_utils.PytorchRunModel(expt_dict)
+        dlrm_base.run_pytorch_model(
             batch_sizes_list.value, threads_per_process_list.value, benchmark_metadata
         )
         create_dlrm_log_tar(server)

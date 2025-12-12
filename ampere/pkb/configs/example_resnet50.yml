@@ -1,0 +1,72 @@
+# Copyright (c) 2025, Ampere Computing LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+
+# Use this config:
+#   - ./pkb.py --benchmarks=ampere_pytorch_resnet --benchmark_config_file=ampere/pkb_internal/configs/ampere_pytorch_resnet/example_resnet50.yml
+# To view available flags:
+#   - ./pkb.py --helpmatch=ampere | grep -A 2 resnet
+#pytorch docker needs 4 volumes to be mounted 
+#1. benchmark file to run 
+#2. output directory path inside docker
+#3. aml setup script path 
+#4. path to python file for installing pytorch as framework
+#* ampere_docker_volume_names are the file path to get files from SUT
+#* ampere_docker_volume_mountpoints are the file path inside the docker
+#As above parameters remain unchanged for dlrm and resnet, they are not mentioned in yml file.
+
+
+static_vms:
+  - &server
+    ip_address: << ip >>
+    user_name: << user >> 
+    ssh_private_key: << path to key file >>
+    os_type: fedora41
+
+vm_groups: &baremetal_group
+  servers:
+    static_vms:
+      - *server
+
+ampere_pytorch_resnet:
+  vm_groups: *baremetal_group
+  flags:
+    ampere_pytorch_resnet_aml_dir: "/workspace/ampere_model_library"
+    ####
+    ampere_docker_image: 'pytorch'
+    #### if user wants to pull existing image
+    ampere_docker_image_repo: 'amperecomputingai'
+    ampere_docker_image_version: '1.12.1'
+    #####
+    ampere_docker_name: 'torch'
+    ampere_docker_daemon: True
+    ampere_docker_use_memory: 700
+    ampere_docker_privileged_docker: True
+    ampere_docker_bash_command: '--entrypoint /bin/sh -it'
+    ampere_pytorch_resnet_threads_per_process: [24]
+    ampere_pytorch_resnet_batch_size: [8,16]
+    #ampere_pytorch_resnet_sla_mode: True
+    #ampere_pytorch_resnet_sla_validation: True
+    #ampere_pytorch_resnet_sla_validation_runs: 2    
+    ampere_pytorch_resnet_threads_range: '0-191'
+    ampere_pytorch_resnet_precision: "fp16"
+    ampere_pytorch_resnet_duration: 90
+flags:
+  ampere_tune_global: []
+  ampere_tune_servers: [
+    "echo 3 > /proc/sys/vm/drop_caches",
+    "cpupower frequency-set --governor performance",
+    "echo always > /sys/kernel/mm/transparent_hugepage/enabled",
+    "echo 0 > /proc/sys/vm/compaction_proactiveness",
+    "echo 1 > /proc/sys/vm/compact_memory"]
