@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Ampere Computing LLC
+# Copyright (c) 2026, Ampere Computing LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -71,10 +71,10 @@ def parse_args():
     parser.add_argument(
         "-r",
         "--threads_range",
+        nargs='+',
         type=str,
         required=True,
-        help="range of threads to use, e.g. '0-63,128-191', "
-             "threads will be divided between processes "
+        help="list of threads separated by space, being divided in processes "
         "- hint: 'lscpu | grep NUMA'",
     )
     parser.add_argument("--kv_cache", type=int, default=65536, help="kv cache size")
@@ -95,49 +95,15 @@ def parse_args():
     parser.add_argument(
         "--stability", action="store_true", help="run till the result is stable"
     )
-    parser.add_argument(
-        "-fa", type=int, default=0, choices=range(0, 2), help="enable flash attention"
-    )
+    parser.add_argument("--mp",
+                        type=str, default="local",
+                        help="memory placement policy, 'local','interleave' or 'none'")
+    parser.add_argument("-fa",
+                        type=int, default=0, choices=range(0, 2),
+                        help="enable flash attention")
+    parser.add_argument("-gpus",
+                        type=int, default=0,choices=range(0, 2), help="gpus is in use")
     return parser.parse_args()
-
-
-def parse_threads_range(threads_range: str) -> list[int]:
-    """
-    Parses a string representing a range of threads and returns a list of individual thread indices.
-
-    The input string is expected to be a comma-separated list of ranges in the format 'start-end',
-    where 'start' and 'end' are integers. Each range specifies a contiguous block of thread indices,
-    and the function will expand these ranges into a list of individual thread indices.
-
-    Args:
-        threads_range (str): A string representing one or more ranges of thread indices,
-                              e.g., '0-3,5-6' results in [0, 1, 2, 3, 5, 6].
-
-    Returns:
-        list[int]: A list of individual thread indices parsed from the input string.
-
-    Raises:
-        ValueError: If the input string is not in the correct format or if any range is invalid
-                    (e.g., when the 'end' index is smaller than the 'start' index).
-
-    """
-    threads_range = [s.split("-") for s in threads_range.split(",")]
-    if not all(len(s) == 2 for s in threads_range):
-        raise ValueError(
-            "Format of --threads_range argument must be '{idx}-{idx},{idx}-{idx},...', "
-            "e.g. '88-88' to use just thread idx 88"
-        )
-    designated_threads = []
-    for s in threads_range:
-        s_0, s_1 = int(s[0]), int(s[1])
-        if s_1 < s_0:
-            raise ValueError(
-                f"Range {s_0}-{s_1} is not valid, second value has to be "
-                f"equal to or greater than the first value"
-            )
-        designated_threads += list(range(s_0, s_1 + 1))
-    return designated_threads
-
 
 def gen_threads_config(num_threads, process_id):
     """
@@ -175,17 +141,9 @@ def main():
     args = parse_args()
 
     llama_bench_exe_path = args.exe_path
-    designated_threads = parse_threads_range(args.threads_range)
-    numa_config = subprocess.run(
-        ["numactl", "--show"], capture_output=True, text=True, check=True
-    )
-    online_threads = [
-        int(t)
-        for t in numa_config.stdout.split("physcpubind: ")[1]
-        .split(" \ncpubind:")[0]
-        .split()
-        if int(t) in designated_threads
-    ]
+
+    online_threads = args.threads_range
+
     if len(online_threads) < args.num_processes * args.num_threads:
         raise ValueError(
             f"Requested config requires {args.num_processes * args.num_threads} threads, "
@@ -195,32 +153,72 @@ def main():
     logs_dir = args.output_dir
     os.mkdir(logs_dir)
     current_subprocesses = []
+
+    if args.mp == "local":
+        mem_place = "--localalloc"
+    elif args.mp == "interleave":
+        mem_place = "--interleave=all"
+    else:
+        mem_place = "none"
+
+    print(f"Mem placement policy is = {mem_place}")
+
     for n in range(args.num_processes):
         logfile = f"{logs_dir}/log_{n}"
-        cmd = [
-            "numactl",
-            f"--physcpubind={gen_threads_config(args.num_threads, n)}",
-            llama_bench_exe_path,
-            "-m",
-            args.model,
-            "-c",
-            str(args.kv_cache),
-            "-b",
-            "2048",
-            "-ub",
-            "512",
-            "-npp",
-            str(args.prompt_size),
-            "-ntg",
-            str(args.tokens),
-            "-npl",
-            str(args.batch_size),
-            "-t",
-            str(args.num_threads),
-            "-tb",
-            str(args.num_threads),
-            "--no-mmap"
-        ]
+        if mem_place == "none":
+            cmd = [
+                "numactl",
+                f"--physcpubind={gen_threads_config(args.num_threads, n)}",
+                llama_bench_exe_path,
+                "-m",
+                args.model,
+                "-c",
+                str(args.kv_cache),
+                "-b",
+                "2048",
+                "-ub",
+                "512",
+                "-npp",
+                str(args.prompt_size),
+                "-ntg",
+                str(args.tokens),
+                "-npl",
+                str(args.batch_size),
+                "-t",
+                str(args.num_threads),
+                "-tb",
+                str(args.num_threads),
+                "--no-mmap"
+            ]
+        else:
+            cmd = [
+                "numactl",
+                f"--physcpubind={gen_threads_config(args.num_threads, n)}",
+                str(mem_place),
+                llama_bench_exe_path,
+                "-m",
+                args.model,
+                "-c",
+                str(args.kv_cache),
+                "-b",
+                "2048",
+                "-ub",
+                "512",
+                "-npp",
+                str(args.prompt_size),
+                "-ntg",
+                str(args.tokens),
+                "-npl",
+                str(args.batch_size),
+                "-t",
+                str(args.num_threads),
+                "-tb",
+                str(args.num_threads),
+                "--no-mmap"
+            ]
+        if args.gpus == 1:
+            cmd.append("-ngl")
+            cmd.append(str(999))
         if args.fa != 0:
             cmd.append("-fa")
             cmd.append("on")
