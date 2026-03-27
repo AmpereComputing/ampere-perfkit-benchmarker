@@ -157,6 +157,13 @@ flags.DEFINE_boolean(
 )
 flags.DEFINE_string(f"{PACKAGE_NAME}_bash_command", None, "sets bash command")
 
+flags.DEFINE_boolean(
+        f"{PACKAGE_NAME}_gpus",
+        False,
+        "pass --gpus for docker to run")
+
+flags.DEFINE_string(f"{PACKAGE_NAME}_gpu_device_id", None, "set gpu device id in docker run")
+
 def Install(vm):
     """Installs the docker on the VM."""
     # install docker package
@@ -319,6 +326,7 @@ def run_docker(vm):
     port = ""
     daemon = ""
     docker_name = ""
+    gpus = ""
     docker_image = _get_docker_image()
     result_path = os.path.join(vm_util.GetTempDir(), "test.log")
     vm.RemoteCommand(f"cd {download_utils.INSTALL_DIR} && touch test.log")
@@ -368,7 +376,13 @@ def run_docker(vm):
         docker_name = f" --name {name_val}"
     if FLAGS[f"{PACKAGE_NAME}_bash_command"].value:
         bash_command = FLAGS[f"{PACKAGE_NAME}_bash_command"].value
-    docker_run_command = f"sudo docker run {daemon} {numa_prefix} {docker_memory}"
+    if FLAGS[f"{PACKAGE_NAME}_gpus"].value:
+        if FLAGS[f"{PACKAGE_NAME}_gpu_device_id"].value:
+            gpu_device_id = FLAGS[f"{PACKAGE_NAME}_gpu_device_id"].value
+            gpus = f" --gpus 'device={gpu_device_id}'"
+        else:
+            gpus = f" --gpus all"
+    docker_run_command = f"sudo docker run {daemon} {numa_prefix} {docker_memory} {gpus}"
     docker_run_command += f" {docker_memory_swap} {privileged} {docker_name}"
     docker_run_command += f" {volumes} {port} {docker_parameters}"
     docker_run_command += f" {bash_command} {docker_image} "

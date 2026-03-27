@@ -39,7 +39,7 @@ ampere_llama_benchmark:
     # to use an existing Llama image
     ampere_docker_image: 'llama.cpp'
     ampere_docker_image_repo: 'amperecomputingai'
-    ampere_docker_image_version: '3.2.1-ampereone'
+    ampere_docker_image_version: '3.3.1-ampereone'
 
     ampere_docker_volume_names: ['/opt/pkb/models', '/opt/pkb/run_llama.py', '/opt/pkb/out_dir']
     ampere_docker_volume_mountpoints: ['/models/', '/utils/benchmark.py','/out_dir/']
