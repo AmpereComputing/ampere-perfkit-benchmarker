@@ -1,32 +1,15 @@
 # Ampere Perfkit Benchmarker
 
-Ampere Perfkit Benchmarker (APKB) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
+Ampere Perfkit Benchmarker (APB) is a fork of PerfKitBenchmarker from GCP: https://github.com/GoogleCloudPlatform/PerfKitBenchmarker
 
-- APKB Version: 2.3.0
-- Upstream Google PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
+- APB Version: 2.4.0
+- Upstream PerfKitBenchmarker commit SHA: 3a8ae41e2c162829d628f9d59ce4aa2060e0b236
 
-Features Added
+APB is an automated performance benchmarking suite that can provision/teardown cloud infrastructure, build applications, run benchmarks, and capture all workload parameters and tunings for a given SUT in a single, replayable `.yaml` configuration file.
 
-- Oracle Cloud Infrastructure (OCI) support as a provider
-    - APKB can automatically provision/cleanup VMs, VCNs, etc. through OCI for workload runs
-- Additional support for BareMetal testing
-- IRQ binding for experimentation with network intensive workloads
-- A global tuning module that enables declarative bash commands from yaml configs on all systems involved in a test
-- Max throughput mode for key workloads to determine the best throughput possible under a given SLA 
-- Includes a suite of microbenchmarks to help characterize performance and system health:  
-  - Multichase: measures memory latency and bandwidth by simulating various memory access patterns
-  - SPECint: characterize compute performance
-  - Netperf: network performance, optimization and troubleshooting
-  - FIO: evaluate I/O characteristics
-- Support for inference benchmarking of large language models (LLaMA, Qwen, etc.)
-- Support for docker daemon installation, docker image creation/pull, and container management 
-
-In summary, APKB is great at capturing all workload parameters and system-under-test parameters in a single, re-playable,
-yaml file.
-
-- See [Contribution Guide](ampere/pkb/docs/CONTRIBUTING.md) for issues, features requests, and questions 
-- See [Guides](ampere/pkb/docs/guides) for various guides, tips, and tricks
 - See [CHANGELOG](CHANGELOG.md) for an exhaustive list of changes, bugfixes, and features
+- See [Guides](ampere/pkb/docs/guides) for various guides, tips, and tricks
+- See [Contribution Guide](ampere/pkb/docs/CONTRIBUTING.md) for issues, feature requests, and questions 
 
 # Licensing
 
@@ -54,15 +37,17 @@ In its current release these are the benchmarks that are executed and their asso
 - `wrk`: [Apache v2](https://github.com/wg/wrk/blob/master/LICENSE)
 - `multichase`: [Apache v2](https://github.com/google/multichase/blob/master/LICENSE)
 
-# APKB: Overview, Setup, and Usage
+# APB: Overview, Setup, and Usage
 
 ## Overview
 
-APKB runs on a separate system from the system-under-test (SUT), and sends commands over SSH to the SUT to perform benchmarks. The steps in this guide will help to prepare a new APKB runner system.
+APB runs on a separate system from the system-under-test (SUT), and sends commands over SSH to the SUT to perform benchmarks.
+
+The steps in this guide will help to prepare a new APB runner system.
 
 ### Test Topology
 
-A minimum of 2+ systems is required for APKB. 
+A minimum of 2+ systems is required for APB. 
 
 The simplest configuration would consist of one runner system and one system-under-test (SUT) for single-node tests. 
 
@@ -83,96 +68,58 @@ a(Runner) -->server
 clients<-.->server
 ```
 
-### Prerequisites
-*For BareMetal / Static VM Tests*
-- Passwordless SSH configured
-  - Runner -> SUT
-  - Runner -> Client(s)
-  - See [here](ampere/pkb/docs/guides/passwordless-ssh.md) for more details
-- Passwordless sudo granted to user on...
-  - SUT
-  - Client(s)
-  - Required for package installation / builds
-- Firewall disabled between SUT and Client(s)
-
-*For Cloud-based Tests*
-- APKB will automatically create the system(s) and SSH keys required for connection under the hood (given a valid cloud YAML config) 
-
-
 ## Dependencies
 
-APKB requires Python 3.11 and above, pip for package management, and a virtual environment for dependencies. Check the current version on your runner system with `python3 --version`. 
+The APB Runner system requires 
+- Python >=3.11
+  - *NOTE*: Python versions >=3.13 may work with APB, however compatibility is not guaranteed and behavior may vary.
+- `pip` for package management
+- A virtual environment for dependencies
 
-If the system does not already have Python 3.11 or higher, install it explicitly, e.g. *Fedora 38*
+## Setup APB
 
-```bash
-sudo dnf install python3.11
-```
-# install pyenv to install python on persistent home directory
-curl https://pyenv.run | bash
-
-# add to path
-echo 'export PATH="$HOME/.pyenv/bin:$PATH"' >> ~/.bashrc
-echo 'eval "$(pyenv init -)"' >> ~/.bashrc
-echo 'eval "$(pyenv virtualenv-init -)"' >> ~/.bashrc
-
-# update bashrc
-source ~/.bashrc
-
-# install python 3.12 and make default
-pyenv install 3.12
-pyenv global 3.12
-```
-<!-- copybara:strip_begin(internal) -->
-<!--* pragma: { seclinter_this_is_fine: false } *-->
-<!-- copybara:strip_end -->
-
-## Setup APKB with setup.sh
-
-The setup script will
-- Determine/detect if Python 3.11.x is installed
-- Create a virtual environment
-- Install all dependencies for APKB
-- Start the virtual environment
-
+Use the setup script
 ```bash
 source setup.sh
 ```
 
-## Setup APKB manually
+The setup script will
+- Detect if Python >=3.11.x is installed
+- Create a virtual environment
+- Install all dependencies for APB
+- Start the virtual environment
 
-**Note**: The following steps are *not* required if you have used the setup script above.
-
-Create a new virtual environment
-
+Alternatively, setup APB manually, e.g.
 ```bash
-python3.11 -m venv venv
+$ sudo dnf install python3.12
+$ python3.12 -m venv venv
+$ source venv/bin/activate
+$ python3.12 -m pip install --upgrade pip
+$ pip install -r requirements.txt
 ```
 
-Start the virtual environment
+## Prerequisites
 
-```bash
-source venv/bin/activate
+- Setup passwordless SSH from the Runner -> SUT/Client(s)
+  - Reference(s): see the [SSH Academy Guide](https://www.ssh.com/academy/ssh/copy-id)
+  - Example path to private key on the Runner: `/home/apb_runner/.ssh/apb_key`
+- Setup passwordless sudo for the user associated with the SSH key on the SUT/Client(s)
+  - Reference(s): see the answer to this post on [Server Fault](https://serverfault.com/questions/160581/how-to-setup-passwordless-sudo-on-linux)
+  - Example user: `apb_user`
+- The external IP address of the SUT
+  - Example IP address: `192.0.2.0`
+
+Example header block for a valid `.yaml` configuration after following the steps above
+```yaml
+static_vms:
+  - &server
+    ip_address: 192.0.2.0
+    user_name: apb_user
+    ssh_private_key: /home/apb_runner/.ssh/apb_key
+    os_type: fedora42
 ```
 
-Upgrade pip inside virtual environment (important)
-
-```bash
-python3.11 -m pip install --upgrade pip
-```
-
-Clone the Ampere Perfkit Benchmarker (APKB) repository 
-
-Next, `cd` into the root of project directory
-
-Then, install requirements (while venv is running!)
-
-```bash
-pip install -r requirements.txt
-```
-
-- There may be a warning during install about "timeout-decorator being installed using legacy 'setup.py install' method", which is safe to ignore 
-
+For more examples see the APB [example configurations](ampere/pkb/configs)
 
 ## Usage
 
@@ -183,7 +130,9 @@ flowchart LR
 Provision -->Prepare-->Run-->Cleanup-->Teardown
 ```
 
-To initiate all phases, simply call APKB with the workload and config of your choice. Run from the root of the project directory and be sure the virtual envirnoment is active.
+To initiate all phases, simply call APB with the workload and config of your choice.
+
+Run from the root of the project directory and be sure the virtual environment is active.
 
 ```bash
 ./pkb.py --benchmarks=<benchmark_name> --benchmark_config_file=<path_to_config>
@@ -194,15 +143,11 @@ e.g. to run NGINX and wrk with an existing YAML config
 ./pkb.py --benchmarks=ampere_nginx_wrk --benchmark_config_file=./ampere/pkb/configs/example_nginx.yml
 ```
 
-For more details about setting up a BareMetal run, see the [BareMetal Getting Started Guide](ampere/pkb/docs/guides/baremetal-getting-started.md)
-
-For more details about setting up cloud-based runs on OCI, see the [OCI Getting Started Guide](ampere/pkb/docs/guides/oci-getting-started.md)
-
-**YAML Configs**
-
-Each YAML config file represents a workload configuration for a certain system(s) and environment
+- Each YAML config file represents a workload configuration for a certain system(s) and environment
 - The path to the configuration file in the run command can be relative or absolute
 - The benchmark name must match the name defined in the YAML config
+- For more details about setting up a BareMetal run, see the [BareMetal Getting Started Guide](ampere/pkb/docs/guides/baremetal-getting-started.md)
+- For more details about setting up cloud-based runs on OCI, see the [OCI Getting Started Guide](ampere/pkb/docs/guides/oci-getting-started.md)
 
 ### A few useful PerfKitBenchmarker flags
 
@@ -221,12 +166,14 @@ Usage example:
 
 ## Results
 
-To deactivate virtual environment
+After an APB run completes the Python virtual environment can be deactivated
+```bash
+deactivate
+```
 
-`deactivate`
-
-All test results, logs, Ampere System Dump results, etc. can be found in
-
-`/tmp/perfkitbenchmarker/runs/<run_uri>`
-
-This directory (with correct run_uri) will be output to the console at the end of each test run.
+For results, see
+- `/tmp/perfkitbenchmarker/runs/<run_uri>`
+  - Parent directory for all test results, logs, etc.
+  - This directory (with the correct run_uri) will be printed to stdout at the end of each test run 
+- `/tmp/perfkitbenchmarker/runs/<run_uri>/perfkitbenchmarker_results.json`
+  - Exhaustive benchmark results and metadata
