@@ -51,8 +51,8 @@ ampere_llama_benchmark:
   description: Benchmark Llama
   vm_groups:
     servers:
-      vm_spec: *default_single_core
-      disk_spec: *default_50_gb
+      vm_spec: *default_dual_core
+      disk_spec: *default_500_gb
 """
 
 FLAGS = flags.FLAGS
