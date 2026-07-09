@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-07-10
+
+### Fixed
+- `llm_benchmark`: improve error handling and logging for malformed arguments and/or OOM issues
+- `llm_benchmark`: per-process logs are now always copied to `/tmp/perfkitbenchmarker/$run_uri`
+- `llm_benchmark`: specifying "latest" for the LLaMA docker image now selects the right one for the SUT
+
 ## [2.4.0] - 2026-03-27
 
 ### Added

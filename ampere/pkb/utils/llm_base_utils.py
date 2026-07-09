@@ -370,13 +370,22 @@ class LlamaExperiment:
                     "bash"
                     )
             FLAGS[f"{docker_package.PACKAGE_NAME}_exec_command"].value = cmd
-            start = time.time()
-            docker_package.exec_docker(vm)
-            finish = time.time()
-            self.tps_per_user = results.summarize(
-                    vm, logs_dir, start, finish, vm_util.GetTempDir()
-                    )
-            results.save_csv(vm_util.GetTempDir())
+            try:
+                start = time.time()
+                docker_package.exec_docker(vm)
+                finish = time.time()
+                self.tps_per_user = results.summarize(
+                        vm, logs_dir, start, finish, vm_util.GetTempDir()
+                        )
+                results.save_csv(vm_util.GetTempDir())
+            except Exception as e:
+                self.vm.RemoteCommand("sudo pkill -f llama-batched-bench")
+                raise ValueError(
+                    f"An unexpected error occurred. "
+                    f"On runner system, check per process logs for more details at: {os.path.join(vm_util.GetTempDir(), str(docker_logs_dir).lstrip('/'))} "
+                    f"(Failure causes likely are: invalid args/command OR process killed midway due to Out of Memory)",
+                ) from e
+            return results            
         return results
 
     def check_run_config_validity(self, n_threads, n_procs):

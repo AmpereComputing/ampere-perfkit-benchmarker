@@ -459,6 +459,29 @@ def GetConfig(user_config):
     config = configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
     return config
 
+def set_docker_version_for_latest(server):
+    """
+    setting actual version of ampere_docker_image_repo llama docker when pulled as latest
+    """
+    if (FLAGS.ampere_docker_image_version == "latest" and 
+        FLAGS.ampere_docker_image_repo == "amperecomputingai"):
+        check_curl = "curl -s \"https://hub.docker.com/v2/repositories/amperecomputingai/llama.cpp/tags?page_size=100&page=1\" | jq -r '.results[].name'"
+        if 'BIOS Model name' in server._lscpu_cache.data:
+            if "AmpereOne" in server._lscpu_cache.data['BIOS Model name']:
+                logging.info(server._lscpu_cache.data['BIOS Model name'])
+                grep_string = "grep ampereone"
+            else:
+                grep_string = "grep -Ev 'neoverse|ampereone|latest'"
+        elif "Neoverse-V2" in server._lscpu_cache.data['Model name']:
+            logging.info(server._lscpu_cache.data['Model name'])
+            grep_string = "grep neoverse"
+        else:
+            grep_string = "grep -Ev 'neoverse|ampereone|latest'"
+        check_curl = check_curl + " | " + grep_string + " |  head -n 1"
+        docker_version, ret = server.RemoteCommand(check_curl)
+        if docker_version.strip():
+            FLAGS.ampere_docker_image_version = docker_version.strip()
+        logging.info(FLAGS.ampere_docker_image_version)
 
 def Prepare(benchmark_spec):
     """Args:
@@ -468,6 +491,7 @@ def Prepare(benchmark_spec):
     servers = benchmark_spec.vm_groups["servers"]
     server = servers[0]
     threads_validation.check_threads_validity(server, BENCHMARK_NAME)
+    set_docker_version_for_latest(server)
     if llm_utils_internal:
         llm_utils_internal.validate_exclusive_run_modes()
     docker_package.Install(server)
@@ -542,15 +566,21 @@ def Run(benchmark_spec):
     sorted_prompt_sizes_list = sorted(prompt_sizes_list.value)
 
     all_samples = None
-    if llm_utils_internal:
-        all_samples = llm_utils_internal.controller(
-            model, sorted_prompt_sizes_list, server
-        )
-    if not all_samples:
-        _run(server, model)
+
+    try:
+        if llm_utils_internal:
+            all_samples = llm_utils_internal.controller(
+                model, sorted_prompt_sizes_list, server
+            )
+        if not all_samples:
+            _run(server, model)
+    except Exception as e:
+        raise ValueError() from e
+    finally:
         out_dir = posixpath.join(download_utils.INSTALL_DIR, "out_dir")
         server.RemoteCopy(vm_util.GetTempDir(), out_dir, False)
-        all_samples = _parse_output_files()
+        if not all_samples:
+            all_samples = _parse_output_files()
     return all_samples
 
 
@@ -581,11 +611,9 @@ def _run(vm: BaseVirtualMachine, model):
                         'tps_per_user':0.0,
                         }
                 LlamaBase = llm_base_utils.LlamaExperiment(expt_dict)
-                results_llama.extend(
-                    LlamaBase.llama_batched_bench_base_run(
-                        num_processes, num_threads, batch_size, model, prompt_size, vm
-                    ).results
-                )
+                result_llama = LlamaBase.llama_batched_bench_base_run(
+                        num_processes, num_threads, batch_size, model, prompt_size, vm).results
+                results_llama.extend(result_llama)
     return results_llama
 
 

@@ -226,17 +226,18 @@ def main():
             cmd.append("-fa")
             cmd.append("off")
 
-        current_subprocesses.append(
-            subprocess.Popen(
+        p = subprocess.Popen(
                 cmd, stdout=open(logfile, "wb"), stderr=open(logfile, "wb")
             )
+        current_subprocesses.append(
+            (n, p, logfile)
         )
 
     completed = False
     while not completed:
         time.sleep(1)
         completed_count = 0
-        for p in current_subprocesses:
+        for (n, p, logfile) in current_subprocesses:
             status = p.poll()
             if status is not None:
                 if status == 0:
@@ -245,9 +246,17 @@ def main():
                         completed = True
                         break
                 else:
-                    raise ValueError(
-                        "FAIL: At least one process returned exit code other than 0 or died!"
-                    )
+                    if status < 0:
+                        raise ValueError(
+                            f"FAIL: Llama process {n} exited with code {-status}. "
+                            f"Check Log: {logfile}"
+                        )
+                    else:
+                        raise ValueError(
+                            f"FAIL: Llama process {n} exited with code {status}. "
+                            f"Check Log: {logfile}"
+                        )
+
 
 if __name__ == "__main__":
     main()
